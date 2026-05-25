@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import httpx
 import os
 import re
+import json
 
 app = FastAPI()
 
@@ -54,12 +55,34 @@ level должен быть одним из: Новичок, Средний, Х�
         )
 
     data = response.json()
+
+    # Логируем полный ответ от Anthropic для отладки
+    print("=== ANTHROPIC RESPONSE ===")
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
     text = "".join(b.get("text", "") for b in data.get("content", []))
+    print("=== RAW TEXT ===")
+    print(repr(text))
 
-    # Убираем markdown-обёртку если Claude всё равно добавил
+    # Убираем markdown
     text = re.sub(r"```(?:json)?", "", text).strip()
+    text = text.replace("```", "").strip()
 
-    return {"result": text}
+    # Пробуем распарсить JSON прямо здесь
+    try:
+        parsed = json.loads(text)
+        return {"result": json.dumps(parsed, ensure_ascii=False)}
+    except Exception as e:
+        # Ищем JSON через regex
+        m = re.search(r'\{[\s\S]*\}', text)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+                return {"result": json.dumps(parsed, ensure_ascii=False)}
+            except:
+                pass
+        # Возвращаем сырой текст и ошибку для отладки
+        return {"result": text, "error": f"parse_error: {str(e)}", "raw": repr(text)}
 
 @app.get("/")
 def root():
