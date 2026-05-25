@@ -15,7 +15,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_KEY = os.environ.get("GROQ_API_KEY")
 
 class Stats(BaseModel):
     kd: str
@@ -30,7 +30,7 @@ class Stats(BaseModel):
 
 @app.post("/analyze")
 async def analyze(stats: Stats):
-    prompt = f"""Ты тренер CS2. Проанализируй статистику игрока и верни ТОЛЬКО валидный JSON без markdown, без пояснений.
+    prompt = f"""Проанализируй статистику игрока CS2 и верни ТОЛЬКО валидный JSON без markdown и пояснений.
 
 Статы: K/D={stats.kd} WR={stats.winrate}% HLTV={stats.hltv} HS={stats.hs}% ADR={stats.adr} 1v1={stats.clutch1v1}% Entry={stats.entrySuccess}% Rank={stats.rank} Matches={stats.matches}
 
@@ -39,26 +39,31 @@ async def analyze(stats: Stats):
 
 level = одно из: Новичок, Средний, Хороший, Про"""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
-
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
-            url,
-            headers={"Content-Type": "application/json"},
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_KEY}",
+                "Content-Type": "application/json",
+            },
             json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.7}
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": "Ты тренер CS2. Отвечай ТОЛЬКО валидным JSON без markdown и пояснений."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.7
             }
         )
 
     data = response.json()
-    print("=== GEMINI RESPONSE ===")
+    print("=== GROQ RESPONSE ===")
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError) as e:
-        return {"error": f"Gemini error: {json.dumps(data)}", "result": ""}
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        return {"error": f"Groq error: {json.dumps(data)}", "result": ""}
 
     print("=== RAW TEXT ===")
     print(repr(text))
