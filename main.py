@@ -2,28 +2,127 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
-import httpx, os, re, json, urllib.parse
+import httpx, os, re, json, urllib.parse, time
+from typing import Optional
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 GROQ_KEY      = os.environ.get("GROQ_API_KEY")
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
-FRONTEND_URL  = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
+FACEIT_KEY    = os.environ.get("FACEIT_API_KEY")
 STEAM_OPENID  = "https://steamcommunity.com/openid/login"
 
-leaderboard = []  # in-memory
+leaderboard      = []
+analysis_history = {}  # steamid -> [entries]
 
-# ── Models ──────────────────────────────────────────────────────────────────
+# ── Models ───────────────────────────────────────────────────────────────────
 class Stats(BaseModel):
     kd: str; winrate: str; hltv: str; hs: str; adr: str
     clutch1v1: str; entrySuccess: str; rank: str; matches: str
+    steamid: Optional[str] = ""
 
 class LBEntry(BaseModel):
     steamid: str; username: str; avatar: str
     stats: dict; level: str; overall: str
 
-# ── Steam Auth ───────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
+async def fetch_steam_profile(steam_id: str, client: httpx.AsyncClient):
+    if not STEAM_API_KEY:
+        return {"username": "Unknown", "avatar": "", "created": None, "level": None}
+    sr = await client.get(
+        "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/",
+        params={"key": STEAM_API_KEY, "steamids": steam_id}
+    )
+    players = sr.json().get("response", {}).get("players", [])
+    if not players:
+        return {"username": "Unknown", "avatar": "", "created": None, "level": None}
+    p = players[0]
+
+    # Steam level
+    lvl_r = await client.get(
+        "https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/",
+        params={"key": STEAM_API_KEY, "steamid": steam_id}
+    )
+    steam_level = lvl_r.json().get("response", {}).get("player_level", None)
+
+    return {
+        "username":    p.get("personaname", "Unknown"),
+        "avatar":      p.get("avatarfull", ""),
+        "created":     p.get("timecreated", None),
+        "steam_level": steam_level,
+        "profile_url": p.get("profileurl", ""),
+        "country":     p.get("loccountrycode", ""),
+    }
+
+async def fetch_cs2_stats(steam_id: str, client: httpx.AsyncClient):
+    if not STEAM_API_KEY:
+        return {}
+    gr = await client.get(
+        "https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/",
+        params={"key": STEAM_API_KEY, "steamid": steam_id, "appid": 730}
+    )
+    raw = {s["name"]: s["value"] for s in gr.json().get("playerstats", {}).get("stats", [])}
+    kills   = raw.get("total_kills", 0)
+    deaths  = raw.get("total_deaths", 1)
+    wins    = raw.get("total_wins", 0)
+    matches = raw.get("total_matches_played", 1)
+    hs_k    = raw.get("total_kills_headshot", 0)
+    mvps    = raw.get("total_mvps", 0)
+    return {
+        "kd":       f"{kills/max(deaths,1):.2f}",
+        "winrate":  f"{wins/max(matches,1)*100:.0f}",
+        "hs":       f"{hs_k/max(kills,1)*100:.0f}",
+        "matches":  str(matches),
+        "kills":    str(kills),
+        "deaths":   str(deaths),
+        "wins":     str(wins),
+        "mvps":     str(mvps),
+        "hltv":     "0.00",
+        "adr":      "0",
+        "clutch1v1":"0",
+        "entrySuccess":"0",
+        "rank":     "0",
+    }
+
+async def fetch_faceit(steam_id: str, client: httpx.AsyncClient):
+    if not FACEIT_KEY:
+        return None
+    try:
+        r = await client.get(
+            "https://open.faceit.com/data/v4/players",
+            params={"game": "cs2", "game_player_id": steam_id},
+            headers={"Authorization": f"Bearer {FACEIT_KEY}"}
+        )
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        game = d.get("games", {}).get("cs2", {})
+        faceit_id = d.get("player_id", "")
+
+        # Fetch lifetime stats
+        stats_r = await client.get(
+            f"https://open.faceit.com/data/v4/players/{faceit_id}/stats/cs2",
+            headers={"Authorization": f"Bearer {FACEIT_KEY}"}
+        )
+        lifetime = {}
+        if stats_r.status_code == 200:
+            lifetime = stats_r.json().get("lifetime", {})
+
+        return {
+            "faceit_level": game.get("skill_level"),
+            "faceit_elo":   game.get("faceit_elo"),
+            "faceit_url":   d.get("faceit_url", "").replace("{lang}", "en"),
+            "faceit_name":  d.get("nickname", ""),
+            "hs_pct":       lifetime.get("Average Headshots %", ""),
+            "kd_ratio":     lifetime.get("Average K/D Ratio", ""),
+            "win_rate":     lifetime.get("Win Rate %", ""),
+            "matches":      lifetime.get("Matches", ""),
+        }
+    except:
+        return None
+
+# ── Steam Auth ────────────────────────────────────────────────────────────────
 @app.get("/auth/steam")
 async def auth_steam(request: Request):
     base = str(request.base_url).rstrip("/")
@@ -40,11 +139,9 @@ async def auth_steam(request: Request):
 @app.get("/auth/steam/callback")
 async def auth_steam_callback(request: Request):
     params = dict(request.query_params)
-    verify_params = {**params, "openid.mode": "check_authentication"}
-
+    verify = {**params, "openid.mode": "check_authentication"}
     async with httpx.AsyncClient(timeout=10) as client:
-        vr = await client.post(STEAM_OPENID, data=verify_params)
-
+        vr = await client.post(STEAM_OPENID, data=verify)
     if "is_valid:true" not in vr.text:
         return HTMLResponse("<script>window.close();</script>")
 
@@ -52,63 +149,38 @@ async def auth_steam_callback(request: Request):
     if not steam_id.isdigit():
         return HTMLResponse("<script>window.close();</script>")
 
-    player = {"steamid": steam_id, "username": "Unknown", "avatar": ""}
-    cs2 = {"kd":"0","winrate":"0","hltv":"0","hs":"0","adr":"0","clutch1v1":"0","entrySuccess":"0","rank":"0","matches":"0"}
+    async with httpx.AsyncClient(timeout=12) as client:
+        profile = await fetch_steam_profile(steam_id, client)
+        cs2     = await fetch_cs2_stats(steam_id, client)
+        faceit  = await fetch_faceit(steam_id, client)
 
-    if STEAM_API_KEY:
-        async with httpx.AsyncClient(timeout=10) as client:
-            # Profile
-            sr = await client.get(
-                "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/",
-                params={"key": STEAM_API_KEY, "steamids": steam_id}
-            )
-            players = sr.json().get("response", {}).get("players", [])
-            if players:
-                player["username"] = players[0].get("personaname", "Unknown")
-                player["avatar"]   = players[0].get("avatarfull", "")
-
-            # CS2 stats
-            gr = await client.get(
-                "https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/",
-                params={"key": STEAM_API_KEY, "steamid": steam_id, "appid": 730}
-            )
-            raw = {s["name"]: s["value"] for s in gr.json().get("playerstats", {}).get("stats", [])}
-            kills   = raw.get("total_kills", 0)
-            deaths  = raw.get("total_deaths", 1)
-            wins    = raw.get("total_wins", 0)
-            matches = raw.get("total_matches_played", 1)
-            hs_k    = raw.get("total_kills_headshot", 0)
-            cs2 = {
-                "kd":          f"{kills/max(deaths,1):.2f}",
-                "winrate":     f"{wins/max(matches,1)*100:.0f}",
-                "hltv":        "0.00",
-                "hs":          f"{hs_k/max(kills,1)*100:.0f}",
-                "adr":         "0",
-                "clutch1v1":   "0",
-                "entrySuccess":"0",
-                "rank":        "0",
-                "matches":     str(matches),
-            }
-
+    player = {"steamid": steam_id, **profile, "faceit": faceit}
     msg = json.dumps({"player": player, "stats": cs2})
+
     html = f"""<!DOCTYPE html><html>
 <head><title>Steam</title></head>
-<body style="background:#0a0a0a;color:#f5c518;font-family:monospace;
-display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+<body style="background:#080807;color:#f5c518;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
   <div style="text-align:center">
-    <div style="font-size:32px;margin-bottom:10px">✓</div>
+    <div style="font-size:36px;margin-bottom:12px">✓</div>
     <div style="letter-spacing:4px;font-size:12px">АВТОРИЗАЦИЯ УСПЕШНА</div>
   </div>
   <script>
-    if(window.opener){{
-      window.opener.postMessage({msg},'*');
-      setTimeout(()=>window.close(),900);
-    }}
+    if(window.opener){{window.opener.postMessage({msg},'*');setTimeout(()=>window.close(),900);}}
   </script>
 </body></html>"""
     return HTMLResponse(html)
 
-# ── Analyze ──────────────────────────────────────────────────────────────────
+# ── Profile ───────────────────────────────────────────────────────────────────
+@app.get("/profile/{steamid}")
+async def get_profile(steamid: str):
+    async with httpx.AsyncClient(timeout=12) as client:
+        profile = await fetch_steam_profile(steamid, client)
+        cs2     = await fetch_cs2_stats(steamid, client)
+        faceit  = await fetch_faceit(steamid, client)
+    history = analysis_history.get(steamid, [])
+    return {"steamid": steamid, **profile, "faceit": faceit, "cs2": cs2, "history": history[:5]}
+
+# ── Analyze ───────────────────────────────────────────────────────────────────
 @app.post("/analyze")
 async def analyze(stats: Stats):
     prompt = f"""Проанализируй статистику игрока CS2 и верни ТОЛЬКО валидный JSON без markdown и пояснений.
@@ -141,21 +213,35 @@ level = одно из: Новичок, Средний, Хороший, Про"""
         return {"error": f"Groq error: {json.dumps(data)}", "result": ""}
 
     text = re.sub(r"```(?:json)?", "", text).strip().replace("```", "").strip()
+
+    parsed = None
     try:
-        return {"result": json.dumps(json.loads(text), ensure_ascii=False)}
+        parsed = json.loads(text)
     except:
         m = re.search(r'\{[\s\S]*\}', text)
         if m:
-            try:
-                return {"result": json.dumps(json.loads(m.group(0)), ensure_ascii=False)}
+            try: parsed = json.loads(m.group(0))
             except: pass
-        return {"result": text, "error": "parse_error"}
 
-# ── Leaderboard ──────────────────────────────────────────────────────────────
+    if parsed and stats.steamid:
+        if stats.steamid not in analysis_history:
+            analysis_history[stats.steamid] = []
+        analysis_history[stats.steamid].insert(0, {
+            "timestamp": int(time.time()),
+            "stats": stats.dict(),
+            "result": parsed
+        })
+        analysis_history[stats.steamid] = analysis_history[stats.steamid][:20]
+
+    if parsed:
+        return {"result": json.dumps(parsed, ensure_ascii=False)}
+    return {"result": text, "error": "parse_error"}
+
+# ── Leaderboard ───────────────────────────────────────────────────────────────
 @app.get("/leaderboard")
 def get_leaderboard():
     s = sorted(leaderboard, key=lambda x: int(x.get("stats", {}).get("rank", 0) or 0), reverse=True)
-    return {"leaderboard": s[:50]}
+    return {"leaderboard": s[:100]}
 
 @app.post("/leaderboard/add")
 async def add_to_leaderboard(entry: LBEntry):
@@ -163,6 +249,11 @@ async def add_to_leaderboard(entry: LBEntry):
     leaderboard = [e for e in leaderboard if e.get("steamid") != entry.steamid]
     leaderboard.append(entry.dict())
     return {"ok": True}
+
+# ── History ───────────────────────────────────────────────────────────────────
+@app.get("/history/{steamid}")
+def get_history(steamid: str):
+    return {"history": analysis_history.get(steamid, [])}
 
 @app.get("/")
 def root():
