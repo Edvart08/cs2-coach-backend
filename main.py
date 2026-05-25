@@ -3,10 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 import os
+import re
 
 app = FastAPI()
 
-# Разрешаем запросы с любого сайта
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,9 +29,13 @@ class Stats(BaseModel):
 
 @app.post("/analyze")
 async def analyze(stats: Stats):
-    prompt = f"""Ты тренер CS2. ТОЛЬКО валидный JSON без markdown. Поля макс 6 слов. Ровно 2 weaknesses, 2 strengths, 3 пункта плана.
-Статы: K/D={stats.kd} WR={stats.winrate}% HLTV={stats.hltv} HS={stats.hs}% ADR={stats.adr} 1v1={stats.clutch1v1}% Entry={stats.entrySuccess}% Rank={stats.rank}
-Шаблон: {{"level":"Новичок","overall":"","mainProblem":"","weaknesses":[{{"stat":"","problem":"","fix":""}},{{"stat":"","problem":"","fix":""}}],"strengths":[{{"stat":"","comment":""}},{{"stat":"","comment":""}}],"plan":["","",""],"goal":""}}"""
+    prompt = f"""Статы игрока CS2:
+K/D={stats.kd} WR={stats.winrate}% HLTV={stats.hltv} HS={stats.hs}% ADR={stats.adr} 1v1={stats.clutch1v1}% Entry={stats.entrySuccess}% Rank={stats.rank} Matches={stats.matches}
+
+Верни ТОЛЬКО этот JSON (без markdown, без пояснений, только фигурные скобки):
+{{"level":"Новичок","overall":"краткий вывод об игре","mainProblem":"главная проблема","weaknesses":[{{"stat":"название","problem":"описание проблемы","fix":"совет"}},{{"stat":"название","problem":"описание проблемы","fix":"совет"}}],"strengths":[{{"stat":"название","comment":"комментарий"}},{{"stat":"название","comment":"комментарий"}}],"plan":["день 1: задание","день 2: задание","день 3: задание"],"goal":"цель через месяц"}}
+
+level должен быть одним из: Новичок, Средний, Хороший, Про"""
 
     async with httpx.AsyncClient(timeout=30) as client:
         response = await client.post(
@@ -44,12 +48,17 @@ async def analyze(stats: Stats):
             json={
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 2000,
+                "system": "Ты тренер CS2. Отвечай ТОЛЬКО валидным JSON без каких-либо пояснений, markdown или дополнительного текста.",
                 "messages": [{"role": "user", "content": prompt}]
             }
         )
-    
+
     data = response.json()
     text = "".join(b.get("text", "") for b in data.get("content", []))
+
+    # Убираем markdown-обёртку если Claude всё равно добавил
+    text = re.sub(r"```(?:json)?", "", text).strip()
+
     return {"result": text}
 
 @app.get("/")
