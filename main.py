@@ -54,14 +54,17 @@ async def steam_profile(steam_id, client):
 
 async def steam_cs2(steam_id, client):
     if not STEAM_API_KEY:
-        return {}
+        return {"private": True}
     gr = await client.get("https://api.steampowered.com/ISteamUserStats/GetUserStatsForGame/v0002/",
         params={"key":STEAM_API_KEY,"steamid":steam_id,"appid":730})
     raw = {s["name"]:s["value"] for s in gr.json().get("playerstats",{}).get("stats",[])}
+    if not raw:
+        return {"private": True}
     k,d = raw.get("total_kills",0), raw.get("total_deaths",1)
     w,m = raw.get("total_wins",0), raw.get("total_matches_played",1)
     hk  = raw.get("total_kills_headshot",0)
     return {
+        "private": False,
         "kd": f"{k/max(d,1):.2f}", "winrate": f"{w/max(m,1)*100:.0f}",
         "hs": f"{hk/max(k,1)*100:.0f}", "matches": str(m),
         "kills": str(k), "deaths": str(d), "wins": str(w),
