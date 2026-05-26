@@ -406,6 +406,42 @@ async def chat(req: ChatReq):
 
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
 
+
+class MatchReq(BaseModel):
+    map: str; result: str; kills: str; deaths: str
+    assists: str; kd: str; hs: str; adr: str; mvps: str; score: str
+
+@app.post("/analyze-match")
+async def analyze_match(req: MatchReq):
+    outcome = "ПОБЕДА" if req.result=="1" else "ПОРАЖЕНИЕ"
+    prompt = f"""Ты CS2 тренер. Игрок сыграл матч и хочет знать что пошло не так.
+
+Матч: {req.map} · {outcome} ({req.score})
+Статы: K/D={req.kd}, Убийства={req.kills}, Смерти={req.deaths}, Ассисты={req.assists}, HS%={req.hs}%, ADR={req.adr}, MVP={req.mvps}
+
+Дай конкретный разбор ЭТОГО матча. Не общие советы — именно что могло произойти исходя из этих цифр.
+
+Верни ТОЛЬКО JSON:
+{{"verdict":"1-2 конкретных предложения про этот матч",
+"mistakes":["конкретная ошибка из этого матча 1","конкретная ошибка 2"],
+"bright":"что было хорошо в этом матче",
+"tip":"одно конкретное что улучшить на {req.map}"
+}}"""
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post("https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
+            json={"model":"llama-3.3-70b-versatile",
+                "messages":[{"role":"system","content":"Тренер CS2. Отвечай ТОЛЬКО JSON без markdown."},
+                             {"role":"user","content":prompt}],
+                "temperature":0.75,
+                "response_format":{"type":"json_object"}})
+    data = r.json()
+    try:
+        return {"result": json.loads(data["choices"][0]["message"]["content"])}
+    except:
+        return {"error": "parse_error"}
+
 @app.get("/health")
 def health():
     return {"status": "ok", "ts": int(time.time())}
