@@ -403,6 +403,111 @@ async def chat(req: ChatReq):
     except:
         return {"error": json.dumps(data)}
 
+
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "ts": int(time.time())}
+
+@app.get("/share/{steamid}", response_class=HTMLResponse)
+async def share_profile(steamid: str):
+    # Fetch data
+    async with httpx.AsyncClient(timeout=14) as client:
+        profile = await steam_profile(steamid, client)
+        cs2     = await steam_cs2(steamid, client)
+    faceit = await faceit_full(steam_id=steamid)
+    fc = faceit if "error" not in faceit else {}
+
+    username  = profile.get("username","Unknown")
+    avatar    = profile.get("avatar","")
+    country   = profile.get("country","")
+    elo       = fc.get("elo","")
+    lvl       = fc.get("level","")
+    fc_nick   = fc.get("nickname","")
+    kd        = fc.get("lifetime",{}).get("kd") or cs2.get("kd","—")
+    wr        = fc.get("lifetime",{}).get("winrate") or cs2.get("winrate","—")
+    hs        = fc.get("lifetime",{}).get("hs") or cs2.get("hs","—")
+    matches   = fc.get("lifetime",{}).get("matches") or cs2.get("matches","—")
+
+    lvl_colors = {"1":"#ccc","2":"#ccc","3":"#1CE400","4":"#1CE400","5":"#FFC800",
+                  "6":"#FFC800","7":"#FF6309","8":"#FF6309","9":"#FE1F00","10":"#FE1F00"}
+    lc = lvl_colors.get(str(lvl),"#f5c518") if lvl else "#f5c518"
+
+    country_flag = ""
+    if country and len(country)==2:
+        try:
+            country_flag = country.upper()
+        except: pass
+
+    history = analysis_history.get(steamid, [])
+    verdict = history[0]["result"].get("overall","") if history else ""
+
+    html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{username} · CS2 AI Тренер</title>
+  <meta property="og:title" content="{username} — CS2 профиль">
+  <meta property="og:description" content="K/D {kd} · WR {wr}% · HS {hs}% · {'FACEIT LVL '+str(lvl)+' · '+str(elo)+' ELO' if elo else 'Steam игрок'}{' · ' + verdict[:80] + '...' if verdict else ''}">
+  <meta property="og:url" content="{FRONTEND_URL}">
+  <meta name="twitter:card" content="summary">
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0;}}
+    body{{background:#0a0a07;font-family:'Segoe UI',system-ui,sans-serif;color:#ddd6bc;
+      display:flex;flex-direction:column;min-height:100vh;align-items:center;justify-content:center;padding:24px;}}
+    .card{{background:#141409;border:1px solid #2e2e1e;border-top:3px solid #f5c518;
+      max-width:480px;width:100%;padding:32px;position:relative;overflow:hidden;}}
+    .glow{{position:absolute;top:-40px;right:-40px;width:180px;height:180px;
+      background:radial-gradient(circle,{lc}20,transparent 70%);pointer-events:none;}}
+    .avatar{{width:80px;height:80px;border-radius:4px;border:2px solid {lc};box-shadow:0 0 16px {lc}44;object-fit:cover;}}
+    .avatar-ph{{width:80px;height:80px;border-radius:4px;border:2px solid {lc};background:#1a1a10;
+      display:flex;align-items:center;justify-content:center;font-size:28px;}}
+    .name{{font-size:22px;color:#f5eed8;font-weight:700;margin-bottom:4px;}}
+    .meta{{font-size:13px;color:#9a9270;margin-bottom:12px;}}
+    .lvl{{display:inline-block;background:{lc};color:#080807;font-size:11px;font-weight:700;padding:3px 10px;margin-bottom:16px;}}
+    .stats{{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #2e2e1e;margin-top:4px;}}
+    .stat{{padding:14px 8px;text-align:center;border-right:1px solid #2e2e1e;}}
+    .stat:last-child{{border-right:none;}}
+    .sl{{font-size:11px;color:#9a9270;letter-spacing:1px;margin-bottom:4px;}}
+    .sv{{font-size:20px;color:#f5c518;font-weight:700;font-family:'Consolas',monospace;}}
+    .verdict{{background:#1a1a0e;border-left:3px solid #f5c518;padding:12px 16px;margin:16px 0;
+      font-size:14px;color:#c8bc98;line-height:1.6;font-style:italic;}}
+    .cta{{display:block;text-align:center;margin-top:20px;padding:12px 24px;
+      background:#f5c518;color:#080807;text-decoration:none;font-weight:700;
+      font-size:14px;letter-spacing:2px;}}
+    .badge{{display:inline-flex;align-items:center;gap:8px;background:{lc}18;
+      border:1px solid {lc}44;padding:6px 14px;margin-bottom:16px;}}
+    .badge-elo{{font-size:22px;color:{lc};font-weight:700;}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="glow"></div>
+    <div style="display:flex;gap:18px;align-items:flex-start;margin-bottom:4px;">
+      {"<img class='avatar' src='"+avatar+"' alt=''/>" if avatar else "<div class='avatar-ph'>👤</div>"}
+      <div style="flex:1;">
+        <div class="name">{username}</div>
+        <div class="meta">{"Steam · " + str(profile.get("steam_level","")) + " lvl" if profile.get("steam_level") else "Steam"}</div>
+        {f'<div class="lvl">FACEIT LVL {lvl}</div>' if lvl else ''}
+        {f'<div class="badge"><span style="font-size:13px;color:#9a9270;">ELO</span><span class="badge-elo">{elo}</span></div>' if elo else ''}
+      </div>
+    </div>
+    {f'<div class="verdict">"{verdict[:120]}..."</div>' if verdict else ''}
+    <div class="stats">
+      <div class="stat"><div class="sl">K/D</div><div class="sv">{kd}</div></div>
+      <div class="stat"><div class="sl">WIN%</div><div class="sv">{wr}%</div></div>
+      <div class="stat"><div class="sl">HS%</div><div class="sv">{hs}%</div></div>
+      <div class="stat"><div class="sl">МАТЧИ</div><div class="sv">{matches}</div></div>
+    </div>
+    <a class="cta" href="{FRONTEND_URL}">ПРОВЕРЬ СВОЙ ПРОФИЛЬ →</a>
+    <div style="text-align:center;margin-top:12px;font-size:11px;color:#4a4830;letter-spacing:2px;">CS2 AI ТРЕНЕР</div>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
 @app.get("/")
 def root():
     return {"status":"ok"}
