@@ -280,9 +280,10 @@ level = одно из: Новичок, Средний, Хороший, Про"""
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
                 "messages":[
-                    {"role":"system","content":"Ты тренер CS2. Отвечай ТОЛЬКО валидным JSON без markdown."},
+                    {"role":"system","content":"Ты тренер CS2. Отвечай ТОЛЬКО валидным JSON-объектом без markdown и пояснений."},
                     {"role":"user","content":prompt}],
-                "temperature":0.7})
+                "temperature":0.6,
+                "response_format":{"type":"json_object"}})
     data = response.json()
     try:
         text = data["choices"][0]["message"]["content"]
