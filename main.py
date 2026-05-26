@@ -63,10 +63,13 @@ async def steam_cs2(steam_id, client):
     k,d = raw.get("total_kills",0), raw.get("total_deaths",1)
     w,m = raw.get("total_wins",0), raw.get("total_matches_played",1)
     hk  = raw.get("total_kills_headshot",0)
+    kd  = round(k/max(d,1), 2)
+    wr  = min(100, round(w/max(m,1)*100))   # clamp 0-100
+    hs  = min(100, round(hk/max(k,1)*100))  # clamp 0-100
     return {
         "private": False,
-        "kd": f"{k/max(d,1):.2f}", "winrate": f"{w/max(m,1)*100:.0f}",
-        "hs": f"{hk/max(k,1)*100:.0f}", "matches": str(m),
+        "kd": f"{kd:.2f}", "winrate": str(wr),
+        "hs": str(hs), "matches": str(m),
         "kills": str(k), "deaths": str(d), "wins": str(w),
         "mvps": str(raw.get("total_mvps",0)),
     }
@@ -327,6 +330,78 @@ async def add_lb(entry: LBEntry):
 @app.get("/history/{steamid}")
 def get_history(steamid: str):
     return {"history":analysis_history.get(steamid,[])}
+
+# ── AI Summary ────────────────────────────────────────────────────────────────
+class SummaryReq(BaseModel):
+    kd: str; winrate: str; hs: str; matches: str; rank: str
+    faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
+    maps: Optional[list] = []
+
+@app.post("/ai-summary")
+async def ai_summary(req: SummaryReq):
+    maps_text = ""
+    if req.maps:
+        rows = [f"{m.get('map')}: {m.get('winrate')}% WR / {m.get('matches')} матчей" for m in req.maps[:6]]
+        maps_text = "\nКарты:\n" + "\n".join(rows)
+
+    prompt = f"""Ты личный CS2 тренер. Игрок только что открыл свой профиль.
+Напиши им честный и конкретный разбор В РАЗГОВОРНОМ ТОНЕ, как будто ты реально знаешь их игру.
+
+Данные: K/D={req.kd}, WR={req.winrate}%, HS%={req.hs}, Матчей={req.matches}, FACEIT lvl={req.faceit_level or "нет"}, ELO={req.faceit_elo or "нет"}{maps_text}
+
+Верни ТОЛЬКО JSON без markdown:
+{{"verdict":"2-3 предложения — честный и конкретный вывод об игроке, как тренер, не как робот",
+"problems":["конкретная проблема 1","конкретная проблема 2","конкретная проблема 3"],
+"priority":"одна главная вещь которую надо исправить прямо сейчас",
+"role":"ENTRY / SUPPORT / RIFLER / LURKER / AWP — угадай по статам",
+"roast":"короткая честная фраза которую скажет суровый тренер, без оскорблений но прямо"
+}}"""
+
+    async with httpx.AsyncClient(timeout=25) as client:
+        r = await client.post("https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
+            json={"model":"llama-3.3-70b-versatile",
+                "messages":[{"role":"system","content":"Ты тренер по CS2. Отвечай ТОЛЬКО валидным JSON без markdown."},
+                             {"role":"user","content":prompt}],
+                "temperature":0.8,
+                "response_format":{"type":"json_object"}})
+    data = r.json()
+    try:
+        text = data["choices"][0]["message"]["content"]
+        return {"result": json.loads(text)}
+    except:
+        return {"error":"parse_error"}
+
+# ── AI Chat ────────────────────────────────────────────────────────────────────
+class ChatMsg(BaseModel):
+    role: str; content: str
+
+class ChatReq(BaseModel):
+    messages: list
+    stats: Optional[dict] = {}
+
+@app.post("/chat")
+async def chat(req: ChatReq):
+    s = req.stats or {}
+    context = (
+        f"Статы игрока: K/D={s.get('kd','?')}, WR={s.get('winrate','?')}%, "
+        f"HS%={s.get('hs','?')}, Матчей={s.get('matches','?')}, "
+        f"FACEIT lvl={s.get('faceit_level','нет')}, ELO={s.get('faceit_elo','нет')}. "
+        f"Отвечай конкретно опираясь на эти данные. Отвечай по-русски. Будь прямым."
+    )
+    system = f"Ты личный CS2 тренер-аналитик. {context}"
+    messages = [{"role":"system","content":system}] + [
+        {"role":m["role"],"content":m["content"]} for m in req.messages[-10:]
+    ]
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post("https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
+            json={"model":"llama-3.3-70b-versatile","messages":messages,"temperature":0.75,"max_tokens":400})
+    data = r.json()
+    try:
+        return {"reply": data["choices"][0]["message"]["content"]}
+    except:
+        return {"error": json.dumps(data)}
 
 @app.get("/")
 def root():
