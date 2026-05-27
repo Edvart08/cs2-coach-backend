@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, HTMLResponse
 from pydantic import BaseModel
-import httpx, os, re, json, urllib.parse, time, asyncio
+import httpx, os, re, json, urllib.parse, time, asyncio, secrets, string
 from typing import Optional
 
 app = FastAPI()
@@ -11,11 +11,47 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 GROQ_KEY      = os.environ.get("GROQ_API_KEY")
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
 FACEIT_KEY    = os.environ.get("FACEIT_API_KEY")
+ADMIN_TOKEN   = os.environ.get("ADMIN_TOKEN", "change_me_in_render")
 STEAM_OPENID  = "https://steamcommunity.com/openid/login"
 FACEIT_BASE   = "https://open.faceit.com/data/v4"
 
 leaderboard      = []
 analysis_history = {}
+
+# ── Pro система ───────────────────────────────────────────────────────────────
+pro_users = {}   # steamid -> {key, activated_at}
+pro_keys  = {}   # key -> {used: bool, steamid: None}
+ai_usage  = {}   # steamid -> {date: str, count: int}
+
+FREE_LIMIT = 5   # AI запросов в день бесплатно
+
+def is_pro(steamid: str) -> bool:
+    return steamid in pro_users
+
+def check_usage(steamid: str) -> dict:
+    today = time.strftime("%Y-%m-%d")
+    u = ai_usage.get(steamid, {"date": today, "count": 0})
+    if u["date"] != today:
+        u = {"date": today, "count": 0}
+    ai_usage[steamid] = u
+    pro = is_pro(steamid)
+    remaining = 999 if pro else max(0, FREE_LIMIT - u["count"])
+    return {"pro": pro, "count": u["count"], "remaining": remaining, "limit": FREE_LIMIT}
+
+def consume_usage(steamid: str):
+    if not steamid or is_pro(steamid):
+        return
+    today = time.strftime("%Y-%m-%d")
+    u = ai_usage.get(steamid, {"date": today, "count": 0})
+    if u["date"] != today:
+        u = {"date": today, "count": 0}
+    u["count"] += 1
+    ai_usage[steamid] = u
+
+def gen_key() -> str:
+    chars = string.ascii_uppercase + string.digits
+    parts = ["".join(secrets.choice(chars) for _ in range(4)) for _ in range(4)]
+    return "CS2PRO-" + "-".join(parts)
 
 def fh():
     return {"Authorization": f"Bearer {FACEIT_KEY}"} if FACEIT_KEY else {}
@@ -265,6 +301,10 @@ async def get_profile(steamid: str):
 # ── Analyze ───────────────────────────────────────────────────────────────────
 @app.post("/analyze")
 async def analyze(stats: Stats):
+    if stats.steamid:
+        usage = check_usage(stats.steamid)
+        if usage["remaining"] == 0:
+            return {"error": "limit_reached", "result": ""}
     maps_text = ""
     if stats.maps:
         rows = [f"{m.get('map')}: WR {m.get('winrate')}%, {m.get('matches')} матчей, K/D {m.get('kd')}" for m in stats.maps[:8]]
@@ -311,6 +351,7 @@ level = одно из: Новичок, Средний, Хороший, Про"""
         analysis_history[stats.steamid] = analysis_history[stats.steamid][:20]
 
     if parsed:
+        if stats.steamid: consume_usage(stats.steamid)
         return {"result":json.dumps(parsed,ensure_ascii=False)}
     return {"result":text,"error":"parse_error"}
 
@@ -441,6 +482,50 @@ async def analyze_match(req: MatchReq):
         return {"result": json.loads(data["choices"][0]["message"]["content"])}
     except:
         return {"error": "parse_error"}
+
+
+# ── Pro эндпоинты ─────────────────────────────────────────────────────────────
+class KeyReq(BaseModel):
+    steamid: str
+    key: str
+
+@app.post("/activate-key")
+async def activate_key(req: KeyReq):
+    k = req.key.upper().strip()
+    if k not in pro_keys:
+        raise HTTPException(status_code=404, detail="Ключ не найден")
+    if pro_keys[k]["used"] and pro_keys[k]["steamid"] != req.steamid:
+        raise HTTPException(status_code=400, detail="Ключ уже использован")
+    pro_keys[k] = {"used": True, "steamid": req.steamid}
+    pro_users[req.steamid] = {"key": k, "activated_at": int(time.time())}
+    return {"ok": True, "message": "Pro активирован!"}
+
+@app.get("/pro/{steamid}")
+async def pro_status(steamid: str):
+    usage = check_usage(steamid)
+    return {"pro": usage["pro"], "remaining": usage["remaining"], "limit": FREE_LIMIT}
+
+@app.post("/admin/keys/generate")
+async def generate_keys(request: Request, n: int = 1):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    n = min(n, 50)
+    keys = []
+    for _ in range(n):
+        k = gen_key()
+        while k in pro_keys:
+            k = gen_key()
+        pro_keys[k] = {"used": False, "steamid": None}
+        keys.append(k)
+    return {"keys": keys}
+
+@app.get("/admin/keys/list")
+async def list_keys(request: Request):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return {"keys": pro_keys, "pro_users": pro_users}
 
 @app.get("/health")
 def health():
