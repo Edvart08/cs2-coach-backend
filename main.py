@@ -8,22 +8,28 @@ from typing import Optional
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+import hashlib
+
 GROQ_KEY      = os.environ.get("GROQ_API_KEY")
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
 FACEIT_KEY    = os.environ.get("FACEIT_API_KEY")
 ADMIN_TOKEN   = os.environ.get("ADMIN_TOKEN", "change_me_in_render")
+FK_SHOP_ID    = os.environ.get("FREEKASSA_SHOP_ID", "")
+FK_SECRET1    = os.environ.get("FREEKASSA_SECRET1", "")
+FK_SECRET2    = os.environ.get("FREEKASSA_SECRET2", "")
+FRONTEND_URL  = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
 STEAM_OPENID  = "https://steamcommunity.com/openid/login"
 FACEIT_BASE   = "https://open.faceit.com/data/v4"
 
-leaderboard      = []
-analysis_history = {}
+leaderboard       = []
+analysis_history  = {}
+pending_payments  = {}   # order_id -> {steamid, plan}
 
 # ── Pro система ───────────────────────────────────────────────────────────────
-pro_users = {}   # steamid -> {key, activated_at}
-pro_keys  = {}   # key -> {used: bool, steamid: None}
-ai_usage  = {}   # steamid -> {date: str, count: int}
-
-FREE_LIMIT = 5   # AI запросов в день бесплатно
+pro_users = {}
+pro_keys  = {}
+ai_usage  = {}
+FREE_LIMIT = 5
 
 def is_pro(steamid: str) -> bool:
     return steamid in pro_users
@@ -53,7 +59,17 @@ def gen_key() -> str:
     parts = ["".join(secrets.choice(chars) for _ in range(4)) for _ in range(4)]
     return "CS2PRO-" + "-".join(parts)
 
-def fh():
+def fk_sign(amount, order_id, secret):
+    return hashlib.md5(f"{FK_SHOP_ID}:{amount}:{secret}:RUB:{order_id}".encode()).hexdigest()
+
+def activate_pro(steamid: str, plan: str, order_id: str):
+    key = gen_key()
+    while key in pro_keys:
+        key = gen_key()
+    pro_keys[key] = {"used": True, "steamid": steamid}
+    pro_users[steamid] = {"key": key, "activated_at": int(time.time()), "plan": plan, "order": order_id}
+
+
     return {"Authorization": f"Bearer {FACEIT_KEY}"} if FACEIT_KEY else {}
 
 # ── Models ───────────────────────────────────────────────────────────────────
@@ -483,6 +499,51 @@ async def analyze_match(req: MatchReq):
     except:
         return {"error": "parse_error"}
 
+
+
+# ── FreeKassa платежи ─────────────────────────────────────────────────────────
+class PaymentReq(BaseModel):
+    steamid: str
+    plan: str = "month"   # month | year
+
+@app.post("/payment/create")
+async def payment_create(req: PaymentReq):
+    if not FK_SHOP_ID:
+        raise HTTPException(status_code=503, detail="Платежи временно недоступны")
+    amount = 299 if req.plan == "month" else 1990
+    order_id = f"{req.steamid}_{int(time.time())}"
+    sign = fk_sign(amount, order_id, FK_SECRET1)
+    pending_payments[order_id] = {"steamid": req.steamid, "plan": req.plan}
+    pay_url = (
+        f"https://pay.freekassa.com/"
+        f"?m={FK_SHOP_ID}&oa={amount}&currency=RUB"
+        f"&o={order_id}&s={sign}&lang=ru"
+        f"&success_url={FRONTEND_URL}?payment=success"
+        f"&failure_url={FRONTEND_URL}?payment=fail"
+    )
+    return {"url": pay_url, "order_id": order_id}
+
+@app.post("/payment/webhook")
+async def payment_webhook(request: Request):
+    try:
+        form = await request.form()
+        d = dict(form)
+    except:
+        d = {}
+    merchant_order = d.get("MERCHANT_ORDER_ID", "")
+    amount         = d.get("AMOUNT", "")
+    sign_got       = d.get("SIGN", "")
+    sign_exp       = hashlib.md5(f"{FK_SHOP_ID}:{amount}:{FK_SECRET2}:{merchant_order}".encode()).hexdigest()
+    if sign_got != sign_exp:
+        return HTMLResponse("NO", status_code=400)
+    if merchant_order in pending_payments:
+        p = pending_payments.pop(merchant_order)
+        activate_pro(p["steamid"], p["plan"], merchant_order)
+    return HTMLResponse("YES")
+
+@app.get("/payment/status/{steamid}")
+async def payment_status(steamid: str):
+    return {"pro": is_pro(steamid), "data": pro_users.get(steamid)}
 
 # ── Pro эндпоинты ─────────────────────────────────────────────────────────────
 class KeyReq(BaseModel):
