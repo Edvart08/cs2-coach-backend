@@ -29,16 +29,16 @@ pending_payments  = {}   # order_id -> {steamid, plan}
 pro_users = {}
 pro_keys  = {}
 ai_usage  = {}
-FREE_LIMIT = 20
+FREE_LIMIT = 1   # 1 бесплатный AI разбор в неделю
 
 def is_pro(steamid: str) -> bool:
     return steamid in pro_users
 
 def check_usage(steamid: str) -> dict:
-    today = time.strftime("%Y-%m-%d")
-    u = ai_usage.get(steamid, {"date": today, "count": 0})
-    if u["date"] != today:
-        u = {"date": today, "count": 0}
+    week = time.strftime("%Y-W%W")
+    u = ai_usage.get(steamid, {"week": week, "count": 0})
+    if u.get("week") != week:
+        u = {"week": week, "count": 0}
     ai_usage[steamid] = u
     pro = is_pro(steamid)
     remaining = 999 if pro else max(0, FREE_LIMIT - u["count"])
@@ -47,10 +47,10 @@ def check_usage(steamid: str) -> dict:
 def consume_usage(steamid: str):
     if not steamid or is_pro(steamid):
         return
-    today = time.strftime("%Y-%m-%d")
-    u = ai_usage.get(steamid, {"date": today, "count": 0})
-    if u["date"] != today:
-        u = {"date": today, "count": 0}
+    week = time.strftime("%Y-W%W")
+    u = ai_usage.get(steamid, {"week": week, "count": 0})
+    if u.get("week") != week:
+        u = {"week": week, "count": 0}
     u["count"] += 1
     ai_usage[steamid] = u
 
