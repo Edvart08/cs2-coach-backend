@@ -29,7 +29,7 @@ pending_payments  = {}   # order_id -> {steamid, plan}
 pro_users = {}
 pro_keys  = {}
 ai_usage  = {}
-FREE_LIMIT = 5
+FREE_LIMIT = 20
 
 def is_pro(steamid: str) -> bool:
     return steamid in pro_users
