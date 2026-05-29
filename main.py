@@ -719,6 +719,27 @@ async def tg_webhook(request: Request):
 
     return {"ok":True}
 
+
+from fastapi.responses import Response as FastResponse
+
+MAP_NAMES = {
+    "mirage":"de_mirage","inferno":"de_inferno","dust2":"de_dust2",
+    "nuke":"de_nuke","ancient":"de_ancient","anubis":"de_anubis",
+    "vertigo":"de_vertigo","overpass":"de_overpass",
+}
+
+@app.get("/map-radar/{mapname}")
+async def map_radar(mapname: str):
+    key = mapname.lower()
+    de_name = MAP_NAMES.get(key, f"de_{key}")
+    url = f"https://cdn.cloudflare.steamstatic.com/apps/csgo/maps/{de_name}_radar.png"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(url, headers={"User-Agent":"Mozilla/5.0"})
+    if r.status_code == 200:
+        return FastResponse(content=r.content, media_type="image/png",
+            headers={"Cache-Control":"public, max-age=86400"})
+    return FastResponse(status_code=404)
+
 @app.get("/health")
 def health():
     return {"status": "ok", "ts": int(time.time())}
