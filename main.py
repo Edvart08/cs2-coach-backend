@@ -603,8 +603,14 @@ async def tg_send(text: str, chat_id: str = None, markup=None):
     if not cid: return
     body = {"chat_id": cid, "text": text, "parse_mode": "HTML"}
     if markup: body["reply_markup"] = markup
-    async with httpx.AsyncClient(timeout=8) as c:
-        await c.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=body)
+    try:
+        async with httpx.AsyncClient(timeout=12) as c:
+            await c.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=body)
+    except Exception:
+        pass
+
+async def _tg_send_bg(text: str, chat_id: str = None, markup=None):
+    asyncio.create_task(tg_send(text, chat_id=chat_id, markup=markup))
 
 @app.post("/support")
 async def support_msg(req: SupportReq):
@@ -612,6 +618,14 @@ async def support_msg(req: SupportReq):
     ts  = int(time.time())
     if sid not in support_sessions:
         support_sessions[sid] = {"username": req.username, "msgs": []}
+
+    # Дедупликация: не добавляем одинаковые сообщения в течение 10 секунд
+    recent = support_sessions[sid]["msgs"]
+    if recent:
+        last = recent[-1]
+        if last["from"] == "user" and last["text"] == req.message and (ts - last["ts"]) < 10:
+            return {"ok": True}  # дубль — игнорируем
+
     support_sessions[sid]["msgs"].append({"from":"user","text":req.message,"ts":ts})
 
     # Уведомляем админа с кнопкой "Ответить"
@@ -626,7 +640,7 @@ async def support_msg(req: SupportReq):
         {"text":f"\u270f\ufe0f Ответить {req.username}","callback_data":f"reply:{sid}"},
         {"text":"\U0001f465 Все диалоги","callback_data":"list_users"},
     ]]}
-    await tg_send(text, markup=markup)
+    await _tg_send_bg(text, markup=markup)
     return {"ok": True}
 
 @app.get("/support/poll/{steamid}")
