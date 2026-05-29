@@ -26,6 +26,8 @@ FACEIT_BASE   = "https://open.faceit.com/data/v4"
 leaderboard       = []
 analysis_history  = {}
 pending_payments  = {}   # order_id -> {steamid, plan}
+support_sessions  = {}   # steamid -> {username, msgs:[{from,text,ts}]}
+admin_active      = {}   # tg_user_id -> steamid (текущий пользователь в диалоге)
 
 # ── Pro система ───────────────────────────────────────────────────────────────
 pro_users = {}
@@ -595,21 +597,119 @@ class SupportReq(BaseModel):
     steamid: Optional[str] = ""
     username: Optional[str] = "Аноним"
 
+async def tg_send(text: str, chat_id: str = None, markup=None):
+    if not TG_BOT_TOKEN: return
+    cid = chat_id or TG_ADMIN_ID
+    if not cid: return
+    body = {"chat_id": cid, "text": text, "parse_mode": "HTML"}
+    if markup: body["reply_markup"] = markup
+    async with httpx.AsyncClient(timeout=8) as c:
+        await c.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json=body)
+
 @app.post("/support")
 async def support_msg(req: SupportReq):
-    if TG_BOT_TOKEN and TG_ADMIN_ID:
-        text = (
-            f"🎯 <b>Обращение в поддержку</b>\n\n"
-            f"<b>Пользователь:</b> {req.username}\n"
-            f"<b>Steam ID:</b> {req.steamid or 'не указан'}\n\n"
-            f"<b>Сообщение:</b>\n{req.message}"
-        )
-        async with httpx.AsyncClient(timeout=8) as client:
-            await client.post(
-                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-                json={"chat_id": TG_ADMIN_ID, "text": text, "parse_mode": "HTML"}
-            )
+    sid = req.steamid or "anon"
+    ts  = int(time.time())
+    if sid not in support_sessions:
+        support_sessions[sid] = {"username": req.username, "msgs": []}
+    support_sessions[sid]["msgs"].append({"from":"user","text":req.message,"ts":ts})
+
+    # Уведомляем админа с кнопкой "Ответить"
+    users_count = len(support_sessions)
+    text = (
+        f"💬 <b>Поддержка · {req.username}</b>
+"
+        f"Steam: <code>{sid}</code>
+
+"
+        f"{req.message}
+
+"
+        f"<i>Активных диалогов: {users_count}</i>"
+    )
+    markup = {"inline_keyboard":[[
+        {"text":f"✏️ Ответить {req.username}","callback_data":f"reply:{sid}"},
+        {"text":"👥 Все диалоги","callback_data":"list_users"},
+    ]]}
+    await tg_send(text, markup=markup)
     return {"ok": True}
+
+@app.get("/support/poll/{steamid}")
+async def support_poll(steamid: str, since: int = 0):
+    sess = support_sessions.get(steamid, {"msgs":[]})
+    new_msgs = [m for m in sess["msgs"] if m["ts"] > since and m["from"]=="admin"]
+    return {"messages": new_msgs}
+
+@app.post("/telegram/webhook")
+async def tg_webhook(request: Request):
+    try: data = await request.json()
+    except: return {"ok":True}
+
+    # Callback кнопки
+    if "callback_query" in data:
+        cb   = data["callback_query"]
+        cid  = str(cb["from"]["id"])
+        cbd  = cb.get("data","")
+        msg_id = cb["message"]["message_id"]
+
+        # Подтверждаем нажатие
+        async with httpx.AsyncClient(timeout=5) as c:
+            await c.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery",
+                json={"callback_query_id": cb["id"]})
+
+        if cbd.startswith("reply:"):
+            steamid = cbd[6:]
+            admin_active[cid] = steamid
+            uname = support_sessions.get(steamid,{}).get("username","?")
+            await tg_send(f"✏️ Режим ответа <b>{uname}</b>
+Напиши сообщение — придёт пользователю на сайт.
+
+/stop — выйти из режима ответа
+/users — все диалоги", chat_id=cid)
+
+        elif cbd == "list_users":
+            if not support_sessions:
+                await tg_send("Нет активных диалогов", chat_id=cid)
+            else:
+                rows = []
+                for sid, sess in list(support_sessions.items())[-10:]:
+                    last = sess["msgs"][-1]["text"][:40] if sess["msgs"] else "—"
+                    rows.append([{"text":f"👤 {sess['username']}: {last}","callback_data":f"reply:{sid}"}])
+                await tg_send("👥 <b>Активные диалоги:</b>", chat_id=cid,
+                    markup={"inline_keyboard":rows})
+        return {"ok":True}
+
+    # Текстовые сообщения от админа
+    if "message" in data:
+        msg  = data["message"]
+        cid  = str(msg.get("from",{}).get("id",""))
+        text = msg.get("text","")
+
+        if text == "/users":
+            if not support_sessions:
+                await tg_send("Нет диалогов", chat_id=cid)
+            else:
+                rows = [[{"text":f"👤 {s['username']}","callback_data":f"reply:{sid}"}]
+                        for sid,s in list(support_sessions.items())[-10:]]
+                await tg_send("👥 Выбери пользователя:", chat_id=cid, markup={"inline_keyboard":rows})
+            return {"ok":True}
+
+        if text == "/stop":
+            admin_active.pop(cid, None)
+            await tg_send("❌ Вышел из режима ответа", chat_id=cid)
+            return {"ok":True}
+
+        # Отправляем ответ пользователю
+        steamid = admin_active.get(cid)
+        if steamid and steamid in support_sessions:
+            ts = int(time.time())
+            support_sessions[steamid]["msgs"].append({"from":"admin","text":text,"ts":ts})
+            uname = support_sessions[steamid]["username"]
+            await tg_send(f"✅ Ответ отправлен <b>{uname}</b>", chat_id=cid)
+        elif cid == TG_ADMIN_ID:
+            await tg_send("Выбери пользователя через /users или кнопку 'Ответить'", chat_id=cid)
+
+    return {"ok":True}
 
 @app.get("/health")
 def health():
