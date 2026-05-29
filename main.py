@@ -17,7 +17,9 @@ ADMIN_TOKEN   = os.environ.get("ADMIN_TOKEN", "change_me_in_render")
 FK_SHOP_ID    = os.environ.get("FREEKASSA_SHOP_ID", "")
 FK_SECRET1    = os.environ.get("FREEKASSA_SECRET1", "")
 FK_SECRET2    = os.environ.get("FREEKASSA_SECRET2", "")
-FRONTEND_URL  = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
+FRONTEND_URL   = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
+TG_BOT_TOKEN   = os.environ.get("TG_BOT_TOKEN", "")
+TG_ADMIN_ID    = os.environ.get("TG_ADMIN_ID", "")
 STEAM_OPENID  = "https://steamcommunity.com/openid/login"
 FACEIT_BASE   = "https://open.faceit.com/data/v4"
 
@@ -446,7 +448,7 @@ async def chat(req: ChatReq):
         f"FACEIT lvl={s.get('faceit_level','нет')}, ELO={s.get('faceit_elo','нет')}. "
         f"Отвечай конкретно опираясь на эти данные. Отвечай по-русски. Будь прямым."
     )
-    system = f"Ты личный CS2 тренер-аналитик. {context}"
+    system = f"Ты личный CS2 тренер-аналитик. {context} Если игрок просит полный структурированный разбор — скажи что его можно получить во вкладке ТРЕНЕР на сайте. В чате давай краткие конкретные советы."
     messages = [{"role":"system","content":system}] + [
         {"role":m["role"],"content":m["content"]} for m in req.messages[-10:]
     ]
@@ -587,6 +589,27 @@ async def list_keys(request: Request):
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
     return {"keys": pro_keys, "pro_users": pro_users}
+
+class SupportReq(BaseModel):
+    message: str
+    steamid: Optional[str] = ""
+    username: Optional[str] = "Аноним"
+
+@app.post("/support")
+async def support_msg(req: SupportReq):
+    if TG_BOT_TOKEN and TG_ADMIN_ID:
+        text = (
+            f"🎯 <b>Обращение в поддержку</b>\n\n"
+            f"<b>Пользователь:</b> {req.username}\n"
+            f"<b>Steam ID:</b> {req.steamid or 'не указан'}\n\n"
+            f"<b>Сообщение:</b>\n{req.message}"
+        )
+        async with httpx.AsyncClient(timeout=8) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
+                json={"chat_id": TG_ADMIN_ID, "text": text, "parse_mode": "HTML"}
+            )
+    return {"ok": True}
 
 @app.get("/health")
 def health():
