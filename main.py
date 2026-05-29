@@ -617,19 +617,14 @@ async def support_msg(req: SupportReq):
     # Уведомляем админа с кнопкой "Ответить"
     users_count = len(support_sessions)
     text = (
-        f"💬 <b>Поддержка · {req.username}</b>
-"
-        f"Steam: <code>{sid}</code>
-
-"
-        f"{req.message}
-
-"
+        f"\U0001f4ac <b>Поддержка \u00b7 {req.username}</b>\n"
+        f"Steam: <code>{sid}</code>\n\n"
+        f"{req.message}\n\n"
         f"<i>Активных диалогов: {users_count}</i>"
     )
     markup = {"inline_keyboard":[[
-        {"text":f"✏️ Ответить {req.username}","callback_data":f"reply:{sid}"},
-        {"text":"👥 Все диалоги","callback_data":"list_users"},
+        {"text":f"\u270f\ufe0f Ответить {req.username}","callback_data":f"reply:{sid}"},
+        {"text":"\U0001f465 Все диалоги","callback_data":"list_users"},
     ]]}
     await tg_send(text, markup=markup)
     return {"ok": True}
@@ -661,11 +656,13 @@ async def tg_webhook(request: Request):
             steamid = cbd[6:]
             admin_active[cid] = steamid
             uname = support_sessions.get(steamid,{}).get("username","?")
-            await tg_send(f"✏️ Режим ответа <b>{uname}</b>
-Напиши сообщение — придёт пользователю на сайт.
-
-/stop — выйти из режима ответа
-/users — все диалоги", chat_id=cid)
+            msg_text = (
+                f"\u270f\ufe0f Режим ответа <b>{uname}</b>\n"
+                "Напиши сообщение — придёт пользователю на сайт.\n\n"
+                "/stop — выйти из режима ответа\n"
+                "/users — все диалоги"
+            )
+            await tg_send(msg_text, chat_id=cid)
 
         elif cbd == "list_users":
             if not support_sessions:
