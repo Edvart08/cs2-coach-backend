@@ -655,12 +655,23 @@ async def tg_webhook(request: Request):
         if cbd.startswith("reply:"):
             steamid = cbd[6:]
             admin_active[cid] = steamid
-            uname = support_sessions.get(steamid,{}).get("username","?")
+            sess = support_sessions.get(steamid, {})
+            uname = sess.get("username","?")
+            # Показываем историю переписки
+            msgs = sess.get("msgs", [])[-10:]
+            history = ""
+            for m in msgs:
+                who = "👤 Игрок" if m["from"]=="user" else "👨‍💼 Ты"
+                history += f"\n{who}: {m['text']}"
             msg_text = (
-                f"\u270f\ufe0f Режим ответа <b>{uname}</b>\n"
-                "Напиши сообщение — придёт пользователю на сайт.\n\n"
-                "/stop — выйти из режима ответа\n"
-                "/users — все диалоги"
+                f"\u270f\ufe0f Отвечаешь <b>{uname}</b>\n"
+                f"Steam: <code>{steamid}</code>\n"
+                f"{'─'*25}\n"
+                f"<b>История ({len(msgs)} сообщ.):</b>"
+                f"{history}\n"
+                f"{'─'*25}\n"
+                "Напиши ответ — придёт на сайт мгновенно.\n"
+                "/stop — выйти | /users — все диалоги"
             )
             await tg_send(msg_text, chat_id=cid)
 
