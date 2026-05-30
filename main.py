@@ -120,14 +120,26 @@ async def steam_cs2(steam_id, client):
     w,m = raw.get("total_wins",0), raw.get("total_matches_played",1)
     hk  = raw.get("total_kills_headshot",0)
     kd  = round(k/max(d,1), 2)
-    wr  = min(100, round(w/max(m,1)*100))   # clamp 0-100
-    hs  = min(100, round(hk/max(k,1)*100))  # clamp 0-100
+    wr  = min(100, round(w/max(m,1)*100))
+    hs  = min(100, round(hk/max(k,1)*100))
+    # Playtime from GetOwnedGames
+    playtime_min = 0
+    try:
+        pg = await client.get("https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
+            params={"key":STEAM_API_KEY,"steamid":steam_id,"appids_filter[0]":730,
+                    "include_appinfo":"false","include_played_free_games":"true"})
+        for g in pg.json().get("response",{}).get("games",[]):
+            if g.get("appid")==730:
+                playtime_min = g.get("playtime_forever",0)
+                break
+    except: pass
     return {
         "private": False,
         "kd": f"{kd:.2f}", "winrate": str(wr),
         "hs": str(hs), "matches": str(m),
         "kills": str(k), "deaths": str(d), "wins": str(w),
         "mvps": str(raw.get("total_mvps",0)),
+        "playtime": str(playtime_min),
     }
 
 # ── FACEIT helpers ────────────────────────────────────────────────────────────
