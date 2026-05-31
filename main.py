@@ -221,14 +221,22 @@ async def faceit_full(steam_id=None, nickname=None):
         hr = await client.get(f"{FACEIT_BASE}/players/{fid}/history",
             params={"game":"cs2","limit":12}, headers=fh())
         match_ids = []
+        elo_changes = {}
         if hr.status_code == 200:
-            match_ids = [m.get("match_id") for m in hr.json().get("items",[])]
+            for m in hr.json().get("items",[]):
+                mid = m.get("match_id")
+                if mid:
+                    match_ids.append(mid)
+                    elo_changes[mid] = m.get("elo_change", 0)
 
         # Per-match stats (parallel)
         matches = []
         if match_ids:
             results = await asyncio.gather(*[faceit_match_stats(client,mid,fid) for mid in match_ids])
-            matches = [m for m in results if m]
+            for mid, m in zip(match_ids, results):
+                if m:
+                    m["elo_change"] = elo_changes.get(mid, 0)
+                    matches.append(m)
 
         return {
             "faceit_id": fid,
