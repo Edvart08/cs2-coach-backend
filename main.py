@@ -812,14 +812,33 @@ async def share_profile(steamid: str):
     history = analysis_history.get(steamid, [])
     verdict = history[0]["result"].get("overall","") if history else ""
 
+    # Считаем рейтинг
+    avg_by_level = [
+        {"kd":0.75,"hs":28,"wr":43},{"kd":0.82,"hs":30,"wr":44},{"kd":0.92,"hs":33,"wr":46},
+        {"kd":1.00,"hs":36,"wr":48},{"kd":1.06,"hs":38,"wr":49},{"kd":1.12,"hs":40,"wr":50},
+        {"kd":1.20,"hs":42,"wr":51},{"kd":1.28,"hs":44,"wr":52},{"kd":1.38,"hs":46,"wr":53},
+        {"kd":1.52,"hs":48,"wr":54},{"kd":1.72,"hs":52,"wr":56},
+    ]
+    import math
+    avg = avg_by_level[min(int(lvl or 0), 10)]
+    def sig(v, a):
+        try: return min(99, max(1, round(100/(1+math.exp(-4*(float(v)/float(a)-1))))))
+        except: return 50
+    kd_f  = float(kd)  if kd  and kd  != "—" else 0
+    hs_f  = float(hs)  if hs  and hs  != "—" else 0
+    wr_f  = float(wr)  if wr  and wr  != "—" else 0
+    rating = min(99, round(sig(kd_f,avg["kd"])*0.45 + sig(hs_f,avg["hs"])*0.25 + sig(wr_f,avg["wr"])*0.30))
+    r_color = "#55ee55" if rating>=70 else "#f5c518" if rating>=45 else "#ff8844"
+    r_label = "ТОП ИГРОК" if rating>=80 else "ВЫШЕ СРЕДНЕГО" if rating>=60 else "СРЕДНИЙ УРОВЕНЬ" if rating>=40 else "ЕСТЬ КУДА РАСТИ"
+
     html = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{username} · CS2 AI Тренер</title>
-  <meta property="og:title" content="{username} — CS2 профиль">
-  <meta property="og:description" content="K/D {kd} · WR {wr}% · HS {hs}% · {'FACEIT LVL '+str(lvl)+' · '+str(elo)+' ELO' if elo else 'Steam игрок'}{' · ' + verdict[:80] + '...' if verdict else ''}">
+  <meta property="og:title" content="{username} — CS2 Coach Rating {rating}/100">
+  <meta property="og:description" content="Рейтинг {rating}/100 · {r_label} · K/D {kd} · WR {wr}% · HS {hs}% · {'FACEIT LVL '+str(lvl)+' · '+str(elo)+' ELO' if elo else 'Steam игрок'}">
   <meta property="og:url" content="{FRONTEND_URL}">
   <meta name="twitter:card" content="summary">
   <style>
@@ -830,45 +849,52 @@ async def share_profile(steamid: str):
       max-width:480px;width:100%;padding:32px;position:relative;overflow:hidden;}}
     .glow{{position:absolute;top:-40px;right:-40px;width:180px;height:180px;
       background:radial-gradient(circle,{lc}20,transparent 70%);pointer-events:none;}}
-    .avatar{{width:80px;height:80px;border-radius:4px;border:2px solid {lc};box-shadow:0 0 16px {lc}44;object-fit:cover;}}
-    .avatar-ph{{width:80px;height:80px;border-radius:4px;border:2px solid {lc};background:#1a1a10;
+    .avatar{{width:72px;height:72px;border-radius:4px;border:2px solid {lc};object-fit:cover;}}
+    .avatar-ph{{width:72px;height:72px;border-radius:4px;border:2px solid {lc};background:#1a1a10;
       display:flex;align-items:center;justify-content:center;font-size:28px;}}
-    .name{{font-size:22px;color:#f5eed8;font-weight:700;margin-bottom:4px;}}
-    .meta{{font-size:13px;color:#9a9270;margin-bottom:12px;}}
-    .lvl{{display:inline-block;background:{lc};color:#080807;font-size:11px;font-weight:700;padding:3px 10px;margin-bottom:16px;}}
-    .stats{{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #2e2e1e;margin-top:4px;}}
-    .stat{{padding:14px 8px;text-align:center;border-right:1px solid #2e2e1e;}}
-    .stat:last-child{{border-right:none;}}
-    .sl{{font-size:11px;color:#9a9270;letter-spacing:1px;margin-bottom:4px;}}
-    .sv{{font-size:20px;color:#f5c518;font-weight:700;font-family:'Consolas',monospace;}}
-    .verdict{{background:#1a1a0e;border-left:3px solid #f5c518;padding:12px 16px;margin:16px 0;
-      font-size:14px;color:#c8bc98;line-height:1.6;font-style:italic;}}
-    .cta{{display:block;text-align:center;margin-top:20px;padding:12px 24px;
-      background:#f5c518;color:#080807;text-decoration:none;font-weight:700;
-      font-size:14px;letter-spacing:2px;}}
+    .name{{font-size:20px;color:#f5eed8;font-weight:700;margin-bottom:4px;}}
+    .meta{{font-size:12px;color:#9a9270;}}
+    .rating-block{{display:flex;align-items:center;gap:16px;margin:20px 0;
+      background:#0d0d09;border:1px solid #2e2e1e;padding:16px 20px;}}
+    .rating-num{{font-size:52px;color:{r_color};font-weight:900;line-height:1;}}
+    .rating-label{{font-size:14px;color:{r_color};font-weight:700;margin-bottom:4px;}}
+    .rating-sub{{font-size:12px;color:#6a6450;}}
+    .stats{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px;}}
+    .stat{{padding:12px 8px;text-align:center;background:#0d0d09;border:1px solid #2e2e1e;}}
+    .sl{{font-size:10px;color:#9a9270;letter-spacing:1px;margin-bottom:4px;}}
+    .sv{{font-size:20px;color:#f5c518;font-weight:700;}}
+    .verdict{{background:#1a1a0e;border-left:3px solid #f5c518;padding:12px 16px;margin:0 0 16px;
+      font-size:13px;color:#c8bc98;line-height:1.6;font-style:italic;}}
+    .cta{{display:block;text-align:center;padding:14px 24px;background:#f5c518;
+      color:#080807;text-decoration:none;font-weight:700;font-size:14px;letter-spacing:2px;}}
     .badge{{display:inline-flex;align-items:center;gap:8px;background:{lc}18;
-      border:1px solid {lc}44;padding:6px 14px;margin-bottom:16px;}}
-    .badge-elo{{font-size:22px;color:{lc};font-weight:700;}}
+      border:1px solid {lc}44;padding:5px 12px;margin:8px 0 16px;}}
   </style>
 </head>
 <body>
   <div class="card">
     <div class="glow"></div>
-    <div style="display:flex;gap:18px;align-items:flex-start;margin-bottom:4px;">
+    <div style="display:flex;gap:16px;align-items:center;margin-bottom:16px;">
       {"<img class='avatar' src='"+avatar+"' alt=''/>" if avatar else "<div class='avatar-ph'>👤</div>"}
       <div style="flex:1;">
         <div class="name">{username}</div>
         <div class="meta">{"Steam · " + str(profile.get("steam_level","")) + " lvl" if profile.get("steam_level") else "Steam"}</div>
-        {f'<div class="lvl">FACEIT LVL {lvl}</div>' if lvl else ''}
-        {f'<div class="badge"><span style="font-size:13px;color:#9a9270;">ELO</span><span class="badge-elo">{elo}</span></div>' if elo else ''}
+        {f'<div class="badge"><span style="font-size:11px;color:#9a9270;letter-spacing:2px;">FACEIT LVL {lvl}</span><span style="font-size:16px;color:{lc};font-weight:700;margin-left:4px;">{elo} ELO</span></div>' if elo else ''}
       </div>
     </div>
-    {f'<div class="verdict">"{verdict[:120]}..."</div>' if verdict else ''}
+    <div class="rating-block">
+      <div class="rating-num">{rating}</div>
+      <div>
+        <div class="rating-label">{r_label}</div>
+        <div class="rating-sub">Лучше чем {rating}% игроков{" FACEIT "+str(lvl) if lvl else ""}</div>
+        <div class="rating-sub" style="margin-top:3px;">CS2 Coach Rating</div>
+      </div>
+    </div>
+    {f'<div class="verdict">"{verdict[:120]}{"..." if len(verdict)>120 else ""}"</div>' if verdict else ''}
     <div class="stats">
       <div class="stat"><div class="sl">K/D</div><div class="sv">{kd}</div></div>
-      <div class="stat"><div class="sl">WIN%</div><div class="sv">{wr}%</div></div>
       <div class="stat"><div class="sl">HS%</div><div class="sv">{hs}%</div></div>
-      <div class="stat"><div class="sl">МАТЧИ</div><div class="sv">{matches}</div></div>
+      <div class="stat"><div class="sl">WIN%</div><div class="sv">{wr}%</div></div>
     </div>
     <a class="cta" href="{FRONTEND_URL}">ПРОВЕРЬ СВОЙ ПРОФИЛЬ →</a>
     <div style="text-align:center;margin-top:12px;font-size:11px;color:#4a4830;letter-spacing:2px;">CS2 AI ТРЕНЕР</div>
