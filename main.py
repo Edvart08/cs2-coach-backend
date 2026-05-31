@@ -117,11 +117,12 @@ async def steam_cs2(steam_id, client):
     if not raw:
         return {"private": True}
     k,d = raw.get("total_kills",0), raw.get("total_deaths",1)
-    w,m = raw.get("total_wins",0), raw.get("total_matches_played",1)
+    w,m = raw.get("total_wins",0), raw.get("total_matches_played",0)
     hk  = raw.get("total_kills_headshot",0)
     kd  = round(k/max(d,1), 2)
-    wr  = min(100, round(w/max(m,1)*100))
-    hs  = min(100, round(hk/max(k,1)*100))
+    # Минимум 10 матчей для достоверного WR, иначе показываем 0
+    wr  = min(99, round(w/max(m,1)*100)) if m >= 10 else 0
+    hs  = min(100, round(hk/max(k,1)*100)) if k > 0 else 0
     # Playtime from GetOwnedGames
     playtime_min = 0
     try:
