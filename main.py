@@ -29,10 +29,30 @@ pending_payments  = {}   # order_id -> {steamid, plan}
 support_sessions  = {}   # steamid -> {username, msgs:[{from,text,ts}]}
 admin_active      = {}   # tg_user_id -> steamid (текущий пользователь в диалоге)
 
-# ── Pro система ───────────────────────────────────────────────────────────────
-pro_users = {}
-pro_keys  = {}
-ai_usage  = {}
+# ── Persistence — файловое хранилище ──────────────────────────────────────────
+DATA_DIR = "/tmp/cs2coach_data"
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def _load(name: str, default):
+    try:
+        path = f"{DATA_DIR}/{name}.json"
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                return json.load(f)
+    except: pass
+    return default
+
+def _save(name: str, data):
+    try:
+        with open(f"{DATA_DIR}/{name}.json", "w") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except: pass
+
+# Загружаем данные при старте
+leaderboard      = _load("leaderboard", [])
+pro_users        = _load("pro_users", {})
+pro_keys         = _load("pro_keys", {})
+ai_usage         = _load("ai_usage", {})
 FREE_LIMIT = 1   # 1 бесплатный AI разбор в неделю
 
 def is_pro(steamid: str) -> bool:
@@ -72,6 +92,7 @@ def activate_pro(steamid: str, plan: str, order_id: str):
         key = gen_key()
     pro_keys[key] = {"used": True, "steamid": steamid}
     pro_users[steamid] = {"key": key, "activated_at": int(time.time()), "plan": plan, "order": order_id}
+    _save("pro_users", pro_users)
 
 
     return {"Authorization": f"Bearer {FACEIT_KEY}"} if FACEIT_KEY else {}
@@ -407,6 +428,7 @@ async def add_lb(entry: LBEntry):
     global leaderboard
     leaderboard = [e for e in leaderboard if e.get("steamid")!=entry.steamid]
     leaderboard.append(entry.dict())
+    _save("leaderboard", leaderboard)
     return {"ok":True}
 
 @app.get("/history/{steamid}")
@@ -414,7 +436,56 @@ def get_history(steamid: str):
     return {"history":analysis_history.get(steamid,[])}
 
 # ── AI Summary ────────────────────────────────────────────────────────────────
-class SummaryReq(BaseModel):
+class WeeklyReportReq(BaseModel):
+    kd_start: str; kd_end: str
+    hs_start: str; hs_end: str
+    wr_start: str; wr_end: str
+    matches_played: str
+    wins: str
+    best_map: Optional[str] = ""
+    worst_map: Optional[str] = ""
+    achievements_unlocked: Optional[list] = []
+    faceit_level: Optional[str] = ""
+    elo_change: Optional[str] = "0"
+
+@app.post("/weekly-report")
+async def weekly_report(req: WeeklyReportReq):
+    kd_diff  = round(float(req.kd_end or 0) - float(req.kd_start or 0), 2)
+    hs_diff  = round(float(req.hs_end or 0) - float(req.hs_start or 0), 1)
+    wr_diff  = round(float(req.wr_end or 0) - float(req.wr_start or 0), 1)
+
+    prompt = f"""Ты CS2 тренер. Напиши еженедельный отчёт для игрока.
+Данные за неделю:
+- K/D: {req.kd_start} → {req.kd_end} ({'+' if kd_diff>=0 else ''}{kd_diff})
+- HS%: {req.hs_start}% → {req.hs_end}% ({'+' if hs_diff>=0 else ''}{hs_diff}%)
+- WR%: {req.wr_start}% → {req.wr_end}% ({'+' if wr_diff>=0 else ''}{wr_diff}%)
+- Сыграно матчей: {req.matches_played}, Побед: {req.wins}
+- Лучшая карта: {req.best_map or 'нет данных'}
+- Худшая карта: {req.worst_map or 'нет данных'}
+- FACEIT уровень: {req.faceit_level or 'нет'}
+- Изменение ELO: {req.elo_change}
+- Разблокированные достижения: {', '.join(req.achievements_unlocked) if req.achievements_unlocked else 'нет'}
+
+Верни ТОЛЬКО JSON без markdown:
+{{"summary":"2-3 предложения о прогрессе за неделю — конкретно с цифрами",
+"highlight":"самое лучшее что произошло за неделю",
+"concern":"главная проблема которую надо решить на следующей неделе",
+"next_week_goal":"конкретная цель на следующую неделю с цифрой",
+"verdict":"РОСТ / СТАГНАЦИЯ / ПАДЕНИЕ — одно слово"
+}}"""
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post("https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
+            json={"model":"llama-3.3-70b-versatile",
+                "messages":[{"role":"system","content":"Ты тренер CS2. Только JSON без markdown."},
+                             {"role":"user","content":prompt}],
+                "temperature":0.7,
+                "response_format":{"type":"json_object"}})
+    try:
+        return {"result": json.loads(r.json()["choices"][0]["message"]["content"])}
+    except:
+        return {"error":"parse_error"}
     kd: str; winrate: str; hs: str; matches: str; rank: str
     faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
     maps: Optional[list] = []
@@ -604,6 +675,7 @@ async def activate_key(req: KeyReq):
         raise HTTPException(status_code=400, detail="Ключ уже использован")
     pro_keys[k] = {"used": True, "steamid": req.steamid}
     pro_users[req.steamid] = {"key": k, "activated_at": int(time.time())}
+    _save("pro_users", pro_users)
     return {"ok": True, "message": "Pro активирован!"}
 
 @app.get("/pro/{steamid}")
