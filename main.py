@@ -418,35 +418,52 @@ class SummaryReq(BaseModel):
     kd: str; winrate: str; hs: str; matches: str; rank: str
     faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
     maps: Optional[list] = []
+    recent_matches: Optional[list] = []
+    best_map: Optional[str] = ""; worst_map: Optional[str] = ""
 
 @app.post("/ai-summary")
 async def ai_summary(req: SummaryReq):
+    # Карты
     maps_text = ""
     if req.maps:
-        rows = [f"{m.get('map')}: {m.get('winrate')}% WR / {m.get('matches')} матчей" for m in req.maps[:6]]
-        maps_text = "\nКарты:\n" + "\n".join(rows)
+        sorted_maps = sorted(req.maps, key=lambda m: float(m.get("winrate",0)), reverse=True)
+        rows = [f"{m.get('map')}: {m.get('winrate')}% WR, {m.get('kd')} K/D, {m.get('matches')} матчей" for m in sorted_maps[:6]]
+        maps_text = "\nСтатистика по картам:\n" + "\n".join(rows)
+        if sorted_maps:
+            maps_text += f"\nЛУЧШАЯ карта: {sorted_maps[0].get('map')} ({sorted_maps[0].get('winrate')}% WR)"
+            maps_text += f"\nХУДШАЯ карта: {sorted_maps[-1].get('map')} ({sorted_maps[-1].get('winrate')}% WR)"
+
+    # Последние матчи
+    recent_text = ""
+    if req.recent_matches:
+        recent_rows = []
+        for m in req.recent_matches[:5]:
+            res = "Победа" if m.get("result") == "1" else "Поражение"
+            recent_rows.append(f"{m.get('map','?')}: {res}, K/D {m.get('kd','?')}, HS {m.get('hs','?')}%, ADR {m.get('adr','?')}")
+        recent_text = "\nПоследние матчи:\n" + "\n".join(recent_rows)
 
     prompt = f"""Ты личный CS2 тренер. Игрок только что открыл свой профиль.
-Напиши им честный и конкретный разбор В РАЗГОВОРНОМ ТОНЕ, как будто ты реально знаешь их игру.
+Напиши им КОНКРЕТНЫЙ разбор — упомяни реальные карты, реальные цифры из их статистики.
+Не пиши общие советы — только то что видишь в данных.
 
-Данные: K/D={req.kd}, WR={req.winrate}%, HS%={req.hs}, Матчей={req.matches}, FACEIT lvl={req.faceit_level or "нет"}, ELO={req.faceit_elo or "нет"}{maps_text}
+Данные: K/D={req.kd}, WR={req.winrate}%, HS%={req.hs}, Матчей={req.matches}, FACEIT lvl={req.faceit_level or "нет"}, ELO={req.faceit_elo or "нет"}{maps_text}{recent_text}
 
 Верни ТОЛЬКО JSON без markdown:
-{{"verdict":"2-3 предложения — честный и конкретный вывод об игроке, как тренер, не как робот",
-"strengths":["сильная сторона 1 с конкретикой","сильная сторона 2 с конкретикой"],
-"problems":["конкретная проблема 1","конкретная проблема 2","конкретная проблема 3"],
-"priority":"одна главная вещь которую надо исправить прямо сейчас — конкретное действие",
+{{"verdict":"2-3 предложения — конкретный вывод с упоминанием реальных карт и цифр из данных выше",
+"strengths":["конкретная сильная сторона с цифрой","конкретная сильная сторона с цифрой"],
+"problems":["конкретная проблема с цифрой или картой","конкретная проблема","конкретная проблема"],
+"priority":"одно конкретное действие прямо сейчас — с привязкой к слабой карте или стате",
 "role":"ENTRY / SUPPORT / RIFLER / LURKER / AWP — угадай по статам",
-"roast":"короткая честная фраза которую скажет суровый тренер, без оскорблений но прямо"
+"roast":"короткая честная фраза суровый тренер, без оскорблений но прямо — упомяни конкретную слабость"
 }}"""
 
     async with httpx.AsyncClient(timeout=25) as client:
         r = await client.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
-                "messages":[{"role":"system","content":"Ты тренер по CS2. Отвечай ТОЛЬКО валидным JSON без markdown."},
+                "messages":[{"role":"system","content":"Ты тренер по CS2. Отвечай ТОЛЬКО валидным JSON без markdown. Всегда упоминай конкретные цифры и карты из данных."},
                              {"role":"user","content":prompt}],
-                "temperature":0.8,
+                "temperature":0.75,
                 "response_format":{"type":"json_object"}})
     data = r.json()
     try:
