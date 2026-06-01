@@ -420,8 +420,14 @@ level = одно из: Новичок, Средний, Хороший, Про"""
 # ── Leaderboard / History ─────────────────────────────────────────────────────
 @app.get("/leaderboard")
 def get_leaderboard():
-    s = sorted(leaderboard, key=lambda x:int(x.get("stats",{}).get("rank",0) or 0), reverse=True)
-    return {"leaderboard":s[:100]}
+    # Сортируем по overall рейтингу (число), fallback на kd
+    def sort_key(x):
+        try: return int(x.get("overall", 0) or 0)
+        except: 
+            try: return float(x.get("stats",{}).get("kd",0) or 0)
+            except: return 0
+    s = sorted(leaderboard, key=sort_key, reverse=True)
+    return {"leaderboard": s[:100], "total": len(leaderboard)}
 
 @app.post("/leaderboard/add")
 async def add_lb(entry: LBEntry):
@@ -429,7 +435,7 @@ async def add_lb(entry: LBEntry):
     leaderboard = [e for e in leaderboard if e.get("steamid")!=entry.steamid]
     leaderboard.append(entry.dict())
     _save("leaderboard", leaderboard)
-    return {"ok":True}
+    return {"ok": True, "total": len(leaderboard)}
 
 @app.get("/history/{steamid}")
 def get_history(steamid: str):
