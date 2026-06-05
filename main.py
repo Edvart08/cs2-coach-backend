@@ -435,7 +435,14 @@ async def add_lb(entry: LBEntry):
     leaderboard = [e for e in leaderboard if e.get("steamid")!=entry.steamid]
     leaderboard.append(entry.dict())
     _save("leaderboard", leaderboard)
-    return {"ok": True, "total": len(leaderboard)}
+    def sort_key(x):
+        try: return int(x.get("overall", 0) or 0)
+        except:
+            try: return float(x.get("stats",{}).get("kd",0) or 0)
+            except: return 0
+    sorted_lb = sorted(leaderboard, key=sort_key, reverse=True)
+    rank = next((i+1 for i,e in enumerate(sorted_lb) if e.get("steamid")==entry.steamid), None)
+    return {"ok": True, "total": len(leaderboard), "rank": rank}
 
 @app.get("/history/{steamid}")
 def get_history(steamid: str):
