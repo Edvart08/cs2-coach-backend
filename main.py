@@ -28,6 +28,8 @@ analysis_history  = {}
 pending_payments  = {}   # order_id -> {steamid, plan}
 support_sessions  = {}   # steamid -> {username, msgs:[{from,text,ts}]}
 admin_active      = {}   # tg_user_id -> steamid (текущий пользователь в диалоге)
+lb_rate_limit     = {}   # steamid -> last_add timestamp (rate limit для лидерборда)
+analyze_rate_limit= {}   # steamid -> last_analyze timestamp
 
 # ── Persistence — файловое хранилище ──────────────────────────────────────────
 DATA_DIR = "/tmp/cs2coach_data"
@@ -367,6 +369,12 @@ async def analyze(stats: Stats):
         usage = check_usage(stats.steamid)
         if usage["remaining"] == 0:
             return {"error": "limit_reached", "result": ""}
+        # Rate limit: не чаще 1 анализа в 10 секунд с одного steamid (защита от скрипт-спама)
+        now = time.time()
+        last_a = analyze_rate_limit.get(stats.steamid, 0)
+        if now - last_a < 10:
+            return {"error": "too_fast", "result": ""}
+        analyze_rate_limit[stats.steamid] = now
     maps_text = ""
     if stats.maps:
         rows = [f"{m.get('map')}: WR {m.get('winrate')}%, {m.get('matches')} матчей, K/D {m.get('kd')}" for m in stats.maps[:8]]
@@ -431,7 +439,21 @@ def get_leaderboard():
 
 @app.post("/leaderboard/add")
 async def add_lb(entry: LBEntry):
-    global leaderboard
+    global leaderboard, lb_rate_limit
+    # Rate limit: один апдейт на steamid не чаще раза в 30 минут
+    now = time.time()
+    last = lb_rate_limit.get(entry.steamid, 0)
+    if now - last < 1800:
+        # Всё равно возвращаем текущий rank — просто не обновляем
+        def sort_key_r(x):
+            try: return int(x.get("overall", 0) or 0)
+            except:
+                try: return float(x.get("stats",{}).get("kd",0) or 0)
+                except: return 0
+        sorted_lb = sorted(leaderboard, key=sort_key_r, reverse=True)
+        rank = next((i+1 for i,e in enumerate(sorted_lb) if e.get("steamid")==entry.steamid), None)
+        return {"ok": True, "total": len(leaderboard), "rank": rank, "cached": True}
+    lb_rate_limit[entry.steamid] = now
     leaderboard = [e for e in leaderboard if e.get("steamid")!=entry.steamid]
     leaderboard.append(entry.dict())
     _save("leaderboard", leaderboard)
