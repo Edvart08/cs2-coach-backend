@@ -906,6 +906,36 @@ async def map_radar(mapname: str):
 def health():
     return {"status": "ok", "ts": int(time.time())}
 
+@app.get("/admin/backup")
+def admin_backup(token: str = ""):
+    """Отдаёт все данные одним JSON — для GitHub Action backup"""
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="forbidden")
+    return {
+        "ts": int(time.time()),
+        "leaderboard": leaderboard,
+        "pro_users": pro_users,
+        "pro_keys": pro_keys,
+        "ai_usage": ai_usage,
+    }
+
+@app.post("/admin/restore")
+async def admin_restore(request: Request, token: str = ""):
+    """Восстанавливает данные из backup"""
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="forbidden")
+    global leaderboard, pro_users, pro_keys, ai_usage
+    data = await request.json()
+    if "leaderboard" in data:
+        leaderboard = data["leaderboard"]; _save("leaderboard", leaderboard)
+    if "pro_users" in data:
+        pro_users = data["pro_users"]; _save("pro_users", pro_users)
+    if "pro_keys" in data:
+        pro_keys = data["pro_keys"]; _save("pro_keys", pro_keys)
+    if "ai_usage" in data:
+        ai_usage = data["ai_usage"]; _save("ai_usage", ai_usage)
+    return {"ok": True, "restored": list(data.keys())}
+
 @app.get("/share/{steamid}", response_class=HTMLResponse)
 async def share_profile(steamid: str):
     # Fetch data
