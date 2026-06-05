@@ -143,8 +143,19 @@ async def steam_cs2(steam_id, client):
     w,m = raw.get("total_wins",0), raw.get("total_matches_played",0)
     hk  = raw.get("total_kills_headshot",0)
     kd  = round(k/max(d,1), 2)
-    # Минимум 10 матчей для достоверного WR, иначе показываем 0
-    wr  = min(99, round(w/max(m,1)*100)) if m >= 10 else 0
+    # Steam API иногда возвращает total_wins как победы в раундах, а не матчах.
+    # Если w > m — значит это раунды. CS матч = ~16 раундов, делим на 16 для оценки.
+    # Дополнительный кап: WR > 75% при 500+ матчах — неправдоподобно, капируем.
+    if m >= 10:
+        raw_wr = round(w / max(m, 1) * 100)
+        if raw_wr > 100:
+            # w — это раунды, не матчи
+            raw_wr = round(w / max(m * 16, 1) * 100)
+        if raw_wr > 80 and m >= 100:
+            raw_wr = 80  # хард-кап: 80% при 100+ матчах — потолок доверия
+        wr = min(79, max(0, raw_wr))
+    else:
+        wr = 0
     hs  = min(100, round(hk/max(k,1)*100)) if k > 0 else 0
     # Playtime from GetOwnedGames
     playtime_min = 0
