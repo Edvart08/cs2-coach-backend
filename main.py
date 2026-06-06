@@ -64,6 +64,7 @@ ai_usage         = _load("ai_usage", {})
 
 # Если pro_users пустой (Render рестартнул) — пробуем восстановить из GitHub backup
 async def restore_from_github():
+    global pro_users, pro_keys, leaderboard, ai_usage
     GITHUB_BACKUP_URL = os.environ.get("GITHUB_BACKUP_URL", "")
     if not GITHUB_BACKUP_URL or pro_users:
         return
@@ -72,7 +73,6 @@ async def restore_from_github():
             r = await client.get(GITHUB_BACKUP_URL)
             if r.status_code == 200:
                 data = r.json()
-                global pro_users, pro_keys, leaderboard, ai_usage
                 if data.get("pro_users"): pro_users = data["pro_users"]; _save("pro_users", pro_users)
                 if data.get("pro_keys"):  pro_keys  = data["pro_keys"];  _save("pro_keys", pro_keys)
                 if data.get("leaderboard"): leaderboard = data["leaderboard"]; _save("leaderboard", leaderboard)
