@@ -1247,7 +1247,7 @@ async def auto_connect_steam(request: Request):
 
 @app.get("/steam/matches/{steamid}")
 async def get_steam_matches(steamid: str, limit: int = 8):
-    """Получаем историю матчей через sharing codes"""
+    """Получаем историю матчей через sharing codes + карта из .dem header"""
     if steamid not in steam_auth_codes:
         raise HTTPException(status_code=404, detail="Auth код не найден.")
     if not STEAM_API_KEY:
@@ -1258,13 +1258,49 @@ async def get_steam_matches(steamid: str, limit: int = 8):
     matches = []
     current_code = info["last_code"]
 
-    # Карты CS2 по их внутренним ID
     MAP_NAMES = {
-        "de_dust2": "Dust2", "de_mirage": "Mirage", "de_inferno": "Inferno",
-        "de_nuke": "Nuke", "de_overpass": "Overpass", "de_ancient": "Ancient",
-        "de_anubis": "Anubis", "de_vertigo": "Vertigo", "de_cache": "Cache",
-        "de_train": "Train", "de_cobblestone": "Cobblestone",
+        "de_dust2":"Dust2","de_mirage":"Mirage","de_inferno":"Inferno",
+        "de_nuke":"Nuke","de_overpass":"Overpass","de_ancient":"Ancient",
+        "de_anubis":"Anubis","de_vertigo":"Vertigo","de_cache":"Cache",
+        "de_train":"Train","de_cbble":"Cobblestone","de_shortdust":"Dust2 Short",
+        "cs_office":"Office","cs_italy":"Italy",
     }
+
+    async def get_demo_map(match_id: str, reservation_id: str) -> str:
+        """Скачиваем первые 4KB .dem файла и читаем карту из header"""
+        # Steam хранит демки по match_id
+        # URL формат: http://replay{N}.valve.net/730/{match_id}_{reservation_id}.dem.bz2
+        for relay in ["1", "2", "3", "4", "5", "230"]:
+            url = f"http://replay{relay}.valve.net/730/{match_id}_{reservation_id}.dem.bz2"
+            try:
+                async with httpx.AsyncClient(timeout=5) as c:
+                    r = await c.get(url, headers={"Range": "bytes=0-8191"})
+                    if r.status_code in (200, 206):
+                        data = r.content
+                        # .dem файл начинается с header:
+                        # 8 bytes magic "HL2DEMO\x00"
+                        # 4 bytes demo_protocol
+                        # 4 bytes network_protocol
+                        # 260 bytes server_name
+                        # 260 bytes client_name
+                        # 260 bytes map_name  ← нам нужно это
+                        # Если bz2 — распаковываем начало
+                        if data[:2] == b'BZ':
+                            import bz2
+                            try:
+                                data = bz2.decompress(data[:8192])
+                            except Exception:
+                                # Частичная распаковка — пробуем напрямую
+                                pass
+                        if data[:7] == b'HL2DEMO':
+                            # map_name начинается с offset 8+4+4+260+260 = 536
+                            map_raw = data[536:536+260]
+                            map_name = map_raw.split(b'\x00')[0].decode('utf-8','ignore').strip()
+                            if map_name.startswith('de_') or map_name.startswith('cs_'):
+                                return MAP_NAMES.get(map_name, map_name.replace('de_','').replace('cs_','').capitalize())
+            except Exception:
+                continue
+        return ""
 
     async with httpx.AsyncClient(timeout=15) as client:
         for _ in range(limit):
@@ -1272,41 +1308,26 @@ async def get_steam_matches(steamid: str, limit: int = 8):
                 break
 
             decoded = decode_sharing_code(current_code)
+            match_id = decoded.get("matchid", "")
+            reservation_id = decoded.get("reservationid", "")
+
             match_entry = {
                 "code": current_code,
-                "match_id": decoded.get("matchid", ""),
-                "map": "Unknown",
+                "match_id": match_id,
+                "map": "",
                 "score": "",
-                "result": "",
                 "date": "",
             }
 
-            # Пробуем получить детали матча через Steam API
-            if decoded.get("matchid"):
-                try:
-                    r2 = await client.get(
-                        "https://api.steampowered.com/ICSGOPlayers_730/GetNextMatchSharingCode/v1",
-                        params={"key": STEAM_API_KEY, "steamid": steamid,
-                                "steamidkey": auth_code, "knowncode": current_code}
-                    )
-                    # Пробуем GetPlayerMatchHistory (если доступен)
-                    r3 = await client.get(
-                        f"https://api.steampowered.com/ICSGO2_730/GetMatchOutcome/v1",
-                        params={"key": STEAM_API_KEY, "matchid": decoded["matchid"],
-                                "outcomeid": decoded.get("outcome", 0)}
-                    )
-                    if r3.status_code == 200:
-                        d3 = r3.json().get("result", {})
-                        map_name = d3.get("map", "")
-                        match_entry["map"] = MAP_NAMES.get(map_name, map_name.replace("de_","").capitalize() if map_name else "Unknown")
-                        match_entry["score"] = f"{d3.get('team1_score','')}:{d3.get('team2_score','')}" if d3.get("team1_score") is not None else ""
-                        match_entry["date"] = str(d3.get("matchtime",""))
-                except Exception:
-                    pass
+            # Пробуем получить карту из .dem header
+            if match_id and reservation_id:
+                map_name = await get_demo_map(match_id, reservation_id)
+                if map_name:
+                    match_entry["map"] = map_name
 
             matches.append(match_entry)
 
-            # Получаем следующий код
+            # Следующий код
             r = await client.get(
                 "https://api.steampowered.com/ICSGOPlayers_730/GetNextMatchSharingCode/v1",
                 params={"key": STEAM_API_KEY, "steamid": steamid,
@@ -1331,23 +1352,30 @@ async def check_steam_auth(steamid: str):
     return {"has_auth": has, "saved_at": steam_auth_codes.get(steamid, {}).get("saved_at")}
 
 def decode_sharing_code(code: str) -> dict:
-    """Декодирует CS2 match sharing code в match ID"""
-    # Формат: CSGO-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
-    # Убираем префикс CSGO- и дефисы
+    """Декодирует CS2 match sharing code"""
     try:
         chars = "ABCDEFGHJKLMNOPQRSTUVWXYZabcdefhjkmnopqrstuvwxyz23456789"
         clean = code.replace("CSGO-", "").replace("-", "")
-        # Декодируем base-57
         n = 0
         for c in reversed(clean):
+            if c not in chars:
+                continue
             n = n * len(chars) + chars.index(c)
-        # Извлекаем поля
-        match_id = (n >> 64) & 0xFFFFFFFFFFFFFFFF
-        outcome_id = (n >> 32) & 0xFFFFFFFF
-        token = n & 0xFFFF
-        return {"matchid": str(match_id), "outcome": outcome_id, "token": token}
+        # Структура: 64 бита matchId + 64 бита reservationId + 16 бит tvPort
+        # Упакованы в little-endian как 144-битное число
+        # Корректное декодирование по спеке akiver/csgo-sharecode
+        tv_port  = n & 0xFFFF
+        n >>= 16
+        res_id   = n & 0xFFFFFFFFFFFFFFFF
+        n >>= 64
+        match_id = n & 0xFFFFFFFFFFFFFFFF
+        return {
+            "matchid": str(match_id),
+            "reservationid": str(res_id),
+            "tvport": tv_port,
+        }
     except Exception as e:
-        return {"matchid": "", "error": str(e)}
+        return {"matchid": "", "reservationid": "", "tvport": 0, "error": str(e)}
 
 
 def admin_backup(token: str = ""):
