@@ -61,6 +61,29 @@ leaderboard      = _load("leaderboard", [])
 pro_users        = _load("pro_users", {})
 pro_keys         = _load("pro_keys", {})
 ai_usage         = _load("ai_usage", {})
+
+# Если pro_users пустой (Render рестартнул) — пробуем восстановить из GitHub backup
+async def restore_from_github():
+    GITHUB_BACKUP_URL = os.environ.get("GITHUB_BACKUP_URL", "")
+    if not GITHUB_BACKUP_URL or pro_users:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(GITHUB_BACKUP_URL)
+            if r.status_code == 200:
+                data = r.json()
+                global pro_users, pro_keys, leaderboard, ai_usage
+                if data.get("pro_users"): pro_users = data["pro_users"]; _save("pro_users", pro_users)
+                if data.get("pro_keys"):  pro_keys  = data["pro_keys"];  _save("pro_keys", pro_keys)
+                if data.get("leaderboard"): leaderboard = data["leaderboard"]; _save("leaderboard", leaderboard)
+                print(f"[RESTORE] Восстановлено из backup: {len(pro_users)} PRO users")
+    except Exception as e:
+        print(f"[RESTORE] Ошибка: {e}")
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(restore_from_github())
+
 FREE_LIMIT = 1   # 1 бесплатный AI разбор в неделю
 
 def is_pro(steamid: str) -> bool:
