@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CS2 Coach — Админ панель</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Rajdhani:wght@500;600;700&display=swap');
+  :root{
+    --bg:#070709;--card:#0e0e12;--border:#1e1e2a;--accent:#f5c518;
+    --blue:#4fc3f7;--green:#69f0ae;--red:#ff5252;--purple:#ce93d8;
+    --text:#e0dff0;--muted:#5a5a7a;--font:'JetBrains Mono',monospace;
+    --head:'Rajdhani',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;overflow-x:hidden;}
+
+  /* Login */
+  #login{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:1000;}
+  .login-box{border:1px solid var(--border);padding:48px;width:360px;text-align:center;position:relative;}
+  .login-box::before{content:'';position:absolute;top:-1px;left:20%;right:20%;height:2px;background:var(--accent);}
+  .login-title{font-family:var(--head);font-size:28px;color:var(--accent);letter-spacing:4px;margin-bottom:8px;}
+  .login-sub{font-size:11px;color:var(--muted);letter-spacing:2px;margin-bottom:32px;}
+  .login-input{width:100%;background:#0a0a0e;border:1px solid var(--border);color:var(--text);
+    padding:14px 16px;font-family:var(--font);font-size:14px;outline:none;margin-bottom:12px;
+    transition:border-color .2s;}
+  .login-input:focus{border-color:var(--accent);}
+  .login-btn{width:100%;background:var(--accent);color:#080807;border:none;padding:14px;
+    font-family:var(--head);font-size:16px;font-weight:700;letter-spacing:3px;cursor:pointer;
+    transition:opacity .2s;}
+  .login-btn:hover{opacity:.85;}
+
+  /* Layout */
+  #app{display:none;height:100vh;flex-direction:column;}
+  .topbar{height:52px;background:var(--card);border-bottom:1px solid var(--border);
+    display:flex;align-items:center;padding:0 24px;gap:16px;flex-shrink:0;}
+  .topbar-logo{font-family:var(--head);font-size:18px;color:var(--accent);letter-spacing:3px;font-weight:700;}
+  .topbar-sep{flex:1;}
+  .online-dot{width:8px;height:8px;background:var(--green);border-radius:50%;animation:pulse 2s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+  .topbar-time{font-size:11px;color:var(--muted);}
+
+  .main{display:flex;flex:1;overflow:hidden;}
+
+  /* Sidebar */
+  .sidebar{width:200px;background:var(--card);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;flex-shrink:0;}
+  .nav-item{padding:14px 20px;cursor:pointer;font-size:12px;letter-spacing:2px;color:var(--muted);
+    border-left:2px solid transparent;transition:all .15s;display:flex;align-items:center;gap:10px;}
+  .nav-item:hover{color:var(--text);background:#12121a;}
+  .nav-item.active{color:var(--accent);border-left-color:var(--accent);background:#12121a;}
+  .nav-icon{font-size:16px;}
+
+  /* Content */
+  .content{flex:1;overflow-y:auto;padding:24px;}
+
+  /* Stat cards */
+  .stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-bottom:24px;}
+  .stat-card{background:var(--card);border:1px solid var(--border);padding:20px;position:relative;overflow:hidden;}
+  .stat-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:2px;}
+  .stat-card.yellow::after{background:var(--accent);}
+  .stat-card.blue::after{background:var(--blue);}
+  .stat-card.green::after{background:var(--green);}
+  .stat-card.red::after{background:var(--red);}
+  .stat-card.purple::after{background:var(--purple);}
+  .stat-label{font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:8px;}
+  .stat-value{font-family:var(--head);font-size:32px;font-weight:700;line-height:1;}
+  .stat-card.yellow .stat-value{color:var(--accent);}
+  .stat-card.blue .stat-value{color:var(--blue);}
+  .stat-card.green .stat-value{color:var(--green);}
+  .stat-card.red .stat-value{color:var(--red);}
+  .stat-card.purple .stat-value{color:var(--purple);}
+
+  /* Section */
+  .section-title{font-family:var(--head);font-size:14px;letter-spacing:3px;color:var(--muted);
+    margin-bottom:12px;display:flex;align-items:center;gap:8px;}
+  .section-title::after{content:'';flex:1;height:1px;background:var(--border);}
+
+  /* Table */
+  .table{width:100%;border-collapse:collapse;margin-bottom:24px;}
+  .table th{text-align:left;font-size:10px;letter-spacing:2px;color:var(--muted);
+    padding:8px 12px;border-bottom:1px solid var(--border);}
+  .table td{padding:10px 12px;border-bottom:1px solid var(--border)11;font-size:13px;}
+  .table tr:hover td{background:#0a0a10;}
+  .badge{display:inline-block;padding:2px 8px;font-size:10px;letter-spacing:1px;font-weight:700;}
+  .badge.pro{background:var(--accent)22;color:var(--accent);border:1px solid var(--accent)44;}
+  .badge.free{background:var(--muted)22;color:var(--muted);border:1px solid var(--muted)44;}
+
+  /* Form */
+  .form-row{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
+  .inp{background:#0a0a0e;border:1px solid var(--border);color:var(--text);
+    padding:10px 14px;font-family:var(--font);font-size:13px;outline:none;
+    transition:border-color .2s;flex:1;min-width:180px;}
+  .inp:focus{border-color:var(--accent);}
+  .btn{padding:10px 20px;border:none;cursor:pointer;font-family:var(--head);
+    font-size:13px;letter-spacing:2px;font-weight:600;transition:opacity .2s;}
+  .btn:hover{opacity:.8;}
+  .btn.primary{background:var(--accent);color:#080807;}
+  .btn.secondary{background:var(--border);color:var(--text);}
+  .btn.danger{background:var(--red)22;color:var(--red);border:1px solid var(--red)44;}
+  .btn.success{background:var(--green)22;color:var(--green);border:1px solid var(--green)44;}
+  select.inp{cursor:pointer;}
+
+  /* Keys grid */
+  .keys-grid{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px;}
+  .key-badge{background:#0a0a0e;border:1px solid var(--border);padding:6px 12px;
+    font-size:12px;color:var(--accent);cursor:pointer;transition:all .15s;
+    display:flex;align-items:center;gap:8px;}
+  .key-badge:hover{border-color:var(--accent)44;background:#12120e;}
+  .key-badge.used{color:var(--muted);border-color:var(--border)88;}
+  .key-copy{font-size:10px;color:var(--muted);}
+
+  /* Logs */
+  .log-entry{display:flex;gap:12px;padding:8px 12px;border-bottom:1px solid var(--border)44;font-size:12px;}
+  .log-ts{color:var(--muted);flex-shrink:0;min-width:90px;}
+  .log-action{color:var(--accent);flex-shrink:0;min-width:140px;}
+  .log-detail{color:var(--text)88;}
+
+  /* Toast */
+  .toast{position:fixed;bottom:24px;right:24px;background:var(--card);border:1px solid var(--green);
+    padding:12px 20px;font-size:13px;color:var(--green);z-index:999;animation:slideIn .3s ease;}
+  @keyframes slideIn{from{transform:translateX(100px);opacity:0;}to{transform:none;opacity:1;}}
+
+  /* Tabs */
+  .page{display:none;}
+  .page.active{display:block;}
+
+  /* Promo table */
+  .promo-code{font-family:var(--font);color:var(--accent);font-weight:700;letter-spacing:2px;}
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="login">
+  <div class="login-box">
+    <div class="login-title">⚙ ADMIN</div>
+    <div class="login-sub">CS2 AI ТРЕНЕР · ПАНЕЛЬ УПРАВЛЕНИЯ</div>
+    <input class="login-input" type="password" id="tokenInput" placeholder="Admin token..." onkeydown="if(event.key==='Enter')doLogin()"/>
+    <button class="login-btn" onclick="doLogin()">ВОЙТИ</button>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <div class="topbar">
+    <div class="topbar-logo">⚙ CS2 ADMIN</div>
+    <div class="topbar-sep"></div>
+    <div class="online-dot"></div>
+    <div class="topbar-time" id="clock"></div>
+    <button class="btn secondary" onclick="logout()" style="padding:6px 14px;font-size:11px;">ВЫЙТИ</button>
+  </div>
+  <div class="main">
+    <div class="sidebar">
+      <div class="nav-item active" onclick="showPage('dashboard')" id="nav-dashboard">
+        <span class="nav-icon">📊</span> ДАШБОРД
+      </div>
+      <div class="nav-item" onclick="showPage('users')" id="nav-users">
+        <span class="nav-icon">👥</span> ПОЛЬЗОВАТЕЛИ
+      </div>
+      <div class="nav-item" onclick="showPage('keys')" id="nav-keys">
+        <span class="nav-icon">🔑</span> КЛЮЧИ PRO
+      </div>
+      <div class="nav-item" onclick="showPage('promo')" id="nav-promo">
+        <span class="nav-icon">🎁</span> ПРОМОКОДЫ
+      </div>
+      <div class="nav-item" onclick="showPage('grant')" id="nav-grant">
+        <span class="nav-icon">⚡</span> ВЫДАТЬ PRO
+      </div>
+      <div class="nav-item" onclick="showPage('logs')" id="nav-logs">
+        <span class="nav-icon">📋</span> ЛОГИ
+      </div>
+    </div>
+    <div class="content">
+
+      <!-- ДАШБОРД -->
+      <div class="page active" id="page-dashboard">
+        <div class="stats-grid" id="statsGrid">
+          <div class="stat-card yellow"><div class="stat-label">ПОЛЬЗОВАТЕЛИ</div><div class="stat-value" id="s-users">—</div></div>
+          <div class="stat-card green"><div class="stat-label">PRO АКТИВНЫХ</div><div class="stat-value" id="s-pro">—</div></div>
+          <div class="stat-card blue"><div class="stat-label">АНАЛИЗОВ СЕГОДНЯ</div><div class="stat-value" id="s-today">—</div></div>
+          <div class="stat-card purple"><div class="stat-label">В ЛИДЕРБОРДЕ</div><div class="stat-value" id="s-lb">—</div></div>
+          <div class="stat-card yellow"><div class="stat-label">НОВЫХ СЕГОДНЯ</div><div class="stat-value" id="s-new">—</div></div>
+          <div class="stat-card red"><div class="stat-label">КЛЮЧЕЙ СВОБОДНО</div><div class="stat-value" id="s-keys">—</div></div>
+        </div>
+        <div class="section-title">ПОСЛЕДНИЕ ДЕЙСТВИЯ</div>
+        <div id="dashLogs"></div>
+      </div>
+
+      <!-- ПОЛЬЗОВАТЕЛИ -->
+      <div class="page" id="page-users">
+        <div class="section-title">ПОЛЬЗОВАТЕЛИ <span style="color:var(--accent);font-size:12px;" id="usersTotal"></span></div>
+        <table class="table">
+          <thead><tr>
+            <th>STEAM ID</th><th>АНАЛИЗОВ</th><th>ПОСЛЕДНИЙ ВХОД</th><th>СТАТУС</th><th>ДЕЙСТВИЯ</th>
+          </tr></thead>
+          <tbody id="usersTable"></tbody>
+        </table>
+      </div>
+
+      <!-- КЛЮЧИ -->
+      <div class="page" id="page-keys">
+        <div class="section-title">ГЕНЕРАЦИЯ КЛЮЧЕЙ PRO</div>
+        <div class="form-row">
+          <input class="inp" type="number" id="keysCount" value="5" min="1" max="50" placeholder="Количество" style="max-width:140px;"/>
+          <button class="btn primary" onclick="generateKeys()">СГЕНЕРИРОВАТЬ</button>
+        </div>
+        <div class="section-title">СВЕЖИЕ КЛЮЧИ</div>
+        <div class="keys-grid" id="newKeysList"></div>
+        <div class="section-title">ВСЕ КЛЮЧИ</div>
+        <table class="table">
+          <thead><tr><th>КЛЮЧ</th><th>СТАТУС</th><th>STEAM ID</th></tr></thead>
+          <tbody id="keysTable"></tbody>
+        </table>
+      </div>
+
+      <!-- ПРОМОКОДЫ -->
+      <div class="page" id="page-promo">
+        <div class="section-title">СОЗДАТЬ ПРОМОКОД</div>
+        <div class="form-row">
+          <input class="inp" id="promoCode" placeholder="Код (пусто = авто)" style="max-width:200px;"/>
+          <input class="inp" type="number" id="promoUses" value="1" min="1" placeholder="Использований" style="max-width:140px;"/>
+          <select class="inp" id="promoPlan" style="max-width:140px;">
+            <option value="month">Месяц</option>
+            <option value="year">Год</option>
+            <option value="lifetime">Навсегда</option>
+          </select>
+          <button class="btn primary" onclick="createPromo()">СОЗДАТЬ</button>
+        </div>
+        <div class="section-title">АКТИВНЫЕ ПРОМОКОДЫ</div>
+        <table class="table">
+          <thead><tr><th>КОД</th><th>ПЛАН</th><th>ОСТАЛОСЬ</th><th>ИСПОЛЬЗОВАНО</th><th>ДАТА</th></tr></thead>
+          <tbody id="promosTable"></tbody>
+        </table>
+      </div>
+
+      <!-- ВЫДАТЬ PRO -->
+      <div class="page" id="page-grant">
+        <div class="section-title">ВЫДАТЬ PRO ВРУЧНУЮ</div>
+        <div class="form-row">
+          <input class="inp" id="grantSteamid" placeholder="Steam ID (76561...)"/>
+          <select class="inp" id="grantPlan" style="max-width:160px;">
+            <option value="manual">Ручная выдача</option>
+            <option value="month">Месяц</option>
+            <option value="year">Год</option>
+            <option value="lifetime">Навсегда</option>
+          </select>
+          <button class="btn success" onclick="grantPro()">ВЫДАТЬ PRO ⚡</button>
+        </div>
+        <div class="section-title">ОТОЗВАТЬ PRO</div>
+        <div class="form-row">
+          <input class="inp" id="revokeSteamid" placeholder="Steam ID (76561...)"/>
+          <button class="btn danger" onclick="revokePro()">ОТОЗВАТЬ ✕</button>
+        </div>
+        <div class="section-title">ТЕКУЩИЕ PRO ПОЛЬЗОВАТЕЛИ</div>
+        <table class="table">
+          <thead><tr><th>STEAM ID</th><th>ПЛАН</th><th>ДАТА АКТИВАЦИИ</th><th>КЛЮЧ</th><th></th></tr></thead>
+          <tbody id="proUsersTable"></tbody>
+        </table>
+      </div>
+
+      <!-- ЛОГИ -->
+      <div class="page" id="page-logs">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div class="section-title" style="margin:0;flex:1;">СИСТЕМНЫЕ ЛОГИ</div>
+          <button class="btn secondary" onclick="loadLogs()" style="padding:6px 14px;font-size:11px;">↻ ОБНОВИТЬ</button>
+        </div>
+        <div id="logsList" style="background:var(--card);border:1px solid var(--border);"></div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+const BACKEND = "https://cs2-coach-backend.onrender.com";
+let TOKEN = "";
+
+function doLogin() {
+  TOKEN = document.getElementById("tokenInput").value.trim();
+  if (!TOKEN) return;
+  fetch(`${BACKEND}/admin/stats?token=${TOKEN}`)
+    .then(r => { if(r.ok) return r.json(); throw new Error("bad token"); })
+    .then(() => {
+      document.getElementById("login").style.display = "none";
+      document.getElementById("app").style.display = "flex";
+      localStorage.setItem("cs2admin_token", TOKEN);
+      initApp();
+    })
+    .catch(() => { document.getElementById("tokenInput").style.borderColor="#ff5252"; });
+}
+
+function logout() {
+  localStorage.removeItem("cs2admin_token");
+  location.reload();
+}
+
+// Автологин
+window.addEventListener("load", () => {
+  const saved = localStorage.getItem("cs2admin_token");
+  if (saved) { document.getElementById("tokenInput").value = saved; TOKEN = saved; doLogin(); }
+});
+
+// Часы
+setInterval(() => {
+  document.getElementById("clock").textContent = new Date().toLocaleTimeString("ru-RU");
+}, 1000);
+
+function showPage(name) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+  document.getElementById("page-"+name).classList.add("active");
+  document.getElementById("nav-"+name).classList.add("active");
+  if (name === "dashboard") loadDashboard();
+  if (name === "users") loadUsers();
+  if (name === "keys") loadKeys();
+  if (name === "promo") loadPromos();
+  if (name === "grant") loadProUsers();
+  if (name === "logs") loadLogs();
+}
+
+function toast(msg, ok=true) {
+  const t = document.createElement("div");
+  t.className = "toast";
+  t.style.borderColor = ok ? "var(--green)" : "var(--red)";
+  t.style.color = ok ? "var(--green)" : "var(--red)";
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+function fmt(ts) {
+  if (!ts) return "—";
+  return new Date(ts*1000).toLocaleString("ru-RU");
+}
+
+function initApp() { loadDashboard(); setInterval(loadDashboard, 30000); }
+
+async function api(path, opts={}) {
+  const r = await fetch(BACKEND + path, opts);
+  return r.json();
+}
+
+async function loadDashboard() {
+  const s = await api(`/admin/stats?token=${TOKEN}`);
+  document.getElementById("s-users").textContent = s.total_users ?? "—";
+  document.getElementById("s-pro").textContent = s.pro_users_count ?? "—";
+  document.getElementById("s-today").textContent = s.analyses_today ?? "—";
+  document.getElementById("s-lb").textContent = s.leaderboard_count ?? "—";
+  document.getElementById("s-new").textContent = s.new_users_today ?? "—";
+  document.getElementById("s-keys").textContent = s.unused_keys ?? "—";
+  const logs = await api(`/admin/logs?token=${TOKEN}`);
+  document.getElementById("dashLogs").innerHTML = (logs.logs||[]).slice(0,10).map(l =>
+    `<div class="log-entry"><span class="log-ts">${fmt(l.ts)}</span><span class="log-action">${l.action}</span><span class="log-detail">${l.detail||""}</span></div>`
+  ).join("") || '<div style="color:var(--muted);padding:12px;font-size:12px;">Логов пока нет</div>';
+}
+
+async function loadUsers() {
+  const d = await api(`/admin/users?token=${TOKEN}&limit=100`);
+  document.getElementById("usersTotal").textContent = `(${d.total || 0})`;
+  document.getElementById("usersTable").innerHTML = (d.users||[]).map(u =>
+    `<tr>
+      <td style="font-family:var(--font);font-size:12px;">${u.steamid}</td>
+      <td>${u.analyses}</td>
+      <td style="font-size:11px;color:var(--muted);">${fmt(u.last_seen)}</td>
+      <td><span class="badge ${u.is_pro?'pro':'free'}">${u.is_pro?'PRO':'FREE'}</span></td>
+      <td>
+        ${!u.is_pro ? `<button class="btn success" style="padding:4px 10px;font-size:11px;" onclick="quickGrant('${u.steamid}')">+PRO</button>` : `<button class="btn danger" style="padding:4px 10px;font-size:11px;" onclick="quickRevoke('${u.steamid}')">−PRO</button>`}
+      </td>
+    </tr>`
+  ).join("") || '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px;">Нет данных</td></tr>';
+}
+
+async function loadKeys() {
+  const d = await api(`/admin/keys/list`, {headers:{"x-admin-token":TOKEN}});
+  const keys = d.keys || {};
+  document.getElementById("keysTable").innerHTML = Object.entries(keys).map(([k,v]) =>
+    `<tr>
+      <td class="promo-code" onclick="copyText('${k}')" style="cursor:pointer;" title="Нажми чтобы скопировать">${k}</td>
+      <td><span class="badge ${v.used?'free':'pro'}">${v.used?'ИСПОЛЬЗОВАН':'СВОБОДЕН'}</span></td>
+      <td style="font-size:11px;color:var(--muted);">${v.steamid||'—'}</td>
+    </tr>`
+  ).join("") || '<tr><td colspan="3" style="color:var(--muted);text-align:center;padding:24px;">Ключей нет</td></tr>';
+}
+
+async function generateKeys() {
+  const n = parseInt(document.getElementById("keysCount").value) || 5;
+  const d = await api(`/admin/keys/generate?n=${n}`, {method:"POST",headers:{"x-admin-token":TOKEN}});
+  if (d.keys) {
+    document.getElementById("newKeysList").innerHTML = d.keys.map(k =>
+      `<div class="key-badge" onclick="copyText('${k}')">${k}<span class="key-copy">📋</span></div>`
+    ).join("");
+    toast(`Сгенерировано ${d.keys.length} ключей`);
+    loadKeys();
+  }
+}
+
+async function loadPromos() {
+  const d = await api(`/admin/promos?token=${TOKEN}`);
+  const promos = d.promos || {};
+  document.getElementById("promosTable").innerHTML = Object.entries(promos).map(([code,p]) =>
+    `<tr>
+      <td class="promo-code" onclick="copyText('${code}')" style="cursor:pointer;">${code}</td>
+      <td>${p.plan}</td>
+      <td style="color:${p.uses_left>0?'var(--green)':'var(--red)'};">${p.uses_left}</td>
+      <td>${p.used_by?.length||0}</td>
+      <td style="font-size:11px;color:var(--muted);">${fmt(p.created_at)}</td>
+    </tr>`
+  ).join("") || '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px;">Промокодов нет</td></tr>';
+}
+
+async function createPromo() {
+  const code = document.getElementById("promoCode").value.trim();
+  const uses = parseInt(document.getElementById("promoUses").value) || 1;
+  const plan = document.getElementById("promoPlan").value;
+  const d = await api(`/admin/promo/create`, {
+    method:"POST", headers:{"x-admin-token":TOKEN,"Content-Type":"application/json"},
+    body: JSON.stringify({code, uses, plan})
+  });
+  if (d.ok) {
+    toast(`Промокод создан: ${d.code}`);
+    document.getElementById("promoCode").value = "";
+    loadPromos();
+  }
+}
+
+async function loadProUsers() {
+  const d = await api(`/admin/keys/list`, {headers:{"x-admin-token":TOKEN}});
+  const pros = d.pro_users || {};
+  document.getElementById("proUsersTable").innerHTML = Object.entries(pros).map(([sid,p]) =>
+    `<tr>
+      <td style="font-size:12px;">${sid}</td>
+      <td><span class="badge pro">${p.plan||'—'}</span></td>
+      <td style="font-size:11px;color:var(--muted);">${fmt(p.activated_at)}</td>
+      <td style="font-size:11px;color:var(--muted);">${p.key||'—'}</td>
+      <td><button class="btn danger" style="padding:4px 10px;font-size:11px;" onclick="quickRevoke('${sid}')">ОТОЗВАТЬ</button></td>
+    </tr>`
+  ).join("") || '<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:24px;">PRO пользователей нет</td></tr>';
+}
+
+async function grantPro() {
+  const steamid = document.getElementById("grantSteamid").value.trim();
+  const plan = document.getElementById("grantPlan").value;
+  if (!steamid) { toast("Введи Steam ID", false); return; }
+  const d = await api(`/admin/grant-pro`, {
+    method:"POST", headers:{"x-admin-token":TOKEN,"Content-Type":"application/json"},
+    body: JSON.stringify({steamid, plan})
+  });
+  if (d.ok) { toast(`PRO выдан: ${steamid}`); document.getElementById("grantSteamid").value=""; loadProUsers(); }
+  else toast(d.detail||"Ошибка", false);
+}
+
+async function revokePro() {
+  const steamid = document.getElementById("revokeSteamid").value.trim();
+  if (!steamid) { toast("Введи Steam ID", false); return; }
+  await api(`/admin/revoke-pro`, {
+    method:"POST", headers:{"x-admin-token":TOKEN,"Content-Type":"application/json"},
+    body: JSON.stringify({steamid})
+  });
+  toast(`PRO отозван: ${steamid}`); document.getElementById("revokeSteamid").value=""; loadProUsers();
+}
+
+async function quickGrant(steamid) {
+  await api(`/admin/grant-pro`, {
+    method:"POST", headers:{"x-admin-token":TOKEN,"Content-Type":"application/json"},
+    body: JSON.stringify({steamid, plan:"manual"})
+  });
+  toast(`PRO выдан: ${steamid}`); loadUsers();
+}
+
+async function quickRevoke(steamid) {
+  await api(`/admin/revoke-pro`, {
+    method:"POST", headers:{"x-admin-token":TOKEN,"Content-Type":"application/json"},
+    body: JSON.stringify({steamid})
+  });
+  toast(`PRO отозван: ${steamid}`); loadUsers(); loadProUsers();
+}
+
+async function loadLogs() {
+  const d = await api(`/admin/logs?token=${TOKEN}`);
+  document.getElementById("logsList").innerHTML = (d.logs||[]).map(l =>
+    `<div class="log-entry"><span class="log-ts">${fmt(l.ts)}</span><span class="log-action">${l.action}</span><span class="log-detail">${l.detail||""}</span></div>`
+  ).join("") || '<div style="color:var(--muted);padding:20px;font-size:12px;text-align:center;">Логов пока нет</div>';
+}
+
+function copyText(text) {
+  navigator.clipboard.writeText(text).then(() => toast(`Скопировано: ${text}`));
+}
+</script>
+</body>
+</html>
