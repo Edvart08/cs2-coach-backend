@@ -1167,7 +1167,124 @@ async def map_radar(mapname: str):
 def health():
     return {"status": "ok", "ts": int(time.time())}
 
-@app.get("/admin/backup")
+# ── Steam Match History via Auth Code ────────────────────────────────────────
+# Хранилище auth кодов (steamid → {auth_code, last_match_code})
+steam_auth_codes: dict = {}
+
+class SteamAuthReq(BaseModel):
+    steamid: str
+    auth_code: str       # код вида XXXX-XXXXX-XXXX из Steam Support
+    match_code: str      # код последнего матча вида CSGO-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+
+@app.post("/steam/auth-code")
+async def save_steam_auth(req: SteamAuthReq):
+    """Сохраняем auth код пользователя и сразу загружаем матчи"""
+    if not STEAM_API_KEY:
+        raise HTTPException(status_code=503, detail="Steam API недоступен")
+
+    # Валидируем что код рабочий — делаем тестовый запрос
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(
+            "https://api.steampowered.com/ICSGOPlayers_730/GetNextMatchSharingCode/v1",
+            params={
+                "key": STEAM_API_KEY,
+                "steamid": req.steamid,
+                "steamidkey": req.auth_code,
+                "knowncode": req.match_code
+            }
+        )
+        if r.status_code == 403:
+            raise HTTPException(status_code=400, detail="Неверный код аутентификации или код матча. Проверь коды и попробуй снова.")
+        if r.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"Ошибка Steam API: {r.status_code}")
+        data = r.json()
+        next_code = data.get("result", {}).get("nextcode", "")
+
+    steam_auth_codes[req.steamid] = {
+        "auth_code": req.auth_code,
+        "last_code": req.match_code,
+        "next_code": next_code,
+        "saved_at": int(time.time())
+    }
+    return {"ok": True, "has_more": bool(next_code and next_code != "n/a")}
+
+@app.get("/steam/matches/{steamid}")
+async def get_steam_matches(steamid: str, limit: int = 8):
+    """Получаем историю матчей через sharing codes"""
+    if steamid not in steam_auth_codes:
+        raise HTTPException(status_code=404, detail="Auth код не найден. Введи коды в настройках.")
+    if not STEAM_API_KEY:
+        raise HTTPException(status_code=503, detail="Steam API недоступен")
+
+    info = steam_auth_codes[steamid]
+    auth_code = info["auth_code"]
+    matches = []
+    current_code = info["last_code"]
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        for _ in range(limit):
+            if not current_code or current_code == "n/a":
+                break
+            # Декодируем sharing code в match ID
+            try:
+                match_info = decode_sharing_code(current_code)
+                matches.append({
+                    "code": current_code,
+                    "match_id": match_info.get("matchid", ""),
+                    "map": match_info.get("map", "Unknown"),
+                })
+            except Exception:
+                matches.append({"code": current_code, "match_id": "", "map": "Unknown"})
+
+            # Получаем следующий код
+            r = await client.get(
+                "https://api.steampowered.com/ICSGOPlayers_730/GetNextMatchSharingCode/v1",
+                params={
+                    "key": STEAM_API_KEY,
+                    "steamid": steamid,
+                    "steamidkey": auth_code,
+                    "knowncode": current_code
+                }
+            )
+            if r.status_code != 200:
+                break
+            next_code = r.json().get("result", {}).get("nextcode", "")
+            if not next_code or next_code == "n/a" or next_code == current_code:
+                break
+            current_code = next_code
+
+    # Обновляем last_code
+    if current_code and current_code != info["last_code"]:
+        steam_auth_codes[steamid]["last_code"] = current_code
+
+    return {"matches": matches, "total": len(matches), "has_auth": True}
+
+@app.get("/steam/has-auth/{steamid}")
+async def check_steam_auth(steamid: str):
+    """Проверить есть ли сохранённый auth код"""
+    has = steamid in steam_auth_codes
+    return {"has_auth": has, "saved_at": steam_auth_codes.get(steamid, {}).get("saved_at")}
+
+def decode_sharing_code(code: str) -> dict:
+    """Декодирует CS2 match sharing code в match ID"""
+    # Формат: CSGO-XXXXX-XXXXX-XXXXX-XXXXX-XXXXX
+    # Убираем префикс CSGO- и дефисы
+    try:
+        chars = "ABCDEFGHJKLMNOPQRSTUVWXYZabcdefhjkmnopqrstuvwxyz23456789"
+        clean = code.replace("CSGO-", "").replace("-", "")
+        # Декодируем base-57
+        n = 0
+        for c in reversed(clean):
+            n = n * len(chars) + chars.index(c)
+        # Извлекаем поля
+        match_id = (n >> 64) & 0xFFFFFFFFFFFFFFFF
+        outcome_id = (n >> 32) & 0xFFFFFFFF
+        token = n & 0xFFFF
+        return {"matchid": str(match_id), "outcome": outcome_id, "token": token}
+    except Exception as e:
+        return {"matchid": "", "error": str(e)}
+
+
 def admin_backup(token: str = ""):
     """Отдаёт все данные одним JSON — для GitHub Action backup"""
     if token != ADMIN_TOKEN:
