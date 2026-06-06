@@ -670,19 +670,46 @@ async def analyze_match(req: MatchReq):
 # ── YooMoney платежи ──────────────────────────────────────────────────────────
 class PaymentReq(BaseModel):
     steamid: str
-    plan: str = "month"   # month | year
+    plan: str = "month"
+    promo: Optional[str] = ""   # промокод
 
 @app.post("/payment/create")
 async def payment_create(req: PaymentReq):
     if not YOO_SECRET:
         raise HTTPException(status_code=503, detail="Платежи временно недоступны")
-    amount = "299.00" if req.plan == "month" else "1990.00"
-    order_id = f"{req.steamid}_{int(time.time())}"
-    pending_payments[order_id] = {"steamid": req.steamid, "plan": req.plan, "amount": amount}
+    base = 299 if req.plan == "month" else 1990
+    final = base
+    promo_applied = None
 
-    # ЮКасса API — создаём платёж
+    # Применяем промокод если есть
+    if req.promo:
+        code = req.promo.upper().strip()
+        if code in promo_codes:
+            p = promo_codes[code]
+            if p["uses_left"] > 0 and req.steamid not in p.get("used_by",[]):
+                discount = p.get("discount", 0)
+                final = max(1, round(base * (1 - discount / 100)))
+                promo_applied = {"code": code, "discount": discount}
+                # Если 100% — активируем бесплатно без платежа
+                if discount >= 100:
+                    p["uses_left"] -= 1
+                    p["used_by"].append(req.steamid)
+                    activate_pro(req.steamid, req.plan, f"promo_{code}")
+                    log_admin("PRO через промокод 100%", f"code={code} steamid={req.steamid}")
+                    return {"ok": True, "free": True, "message": "PRO активирован бесплатно!"}
+
+    amount = f"{final}.00"
+    order_id = f"{req.steamid}_{int(time.time())}"
+    pending_payments[order_id] = {
+        "steamid": req.steamid, "plan": req.plan,
+        "amount": amount, "promo": promo_applied
+    }
+
     import base64
     creds = base64.b64encode(f"{YOO_SHOP_ID}:{YOO_SECRET}".encode()).decode()
+    desc = f"CS2 AI Тренер PRO — {req.plan}"
+    if promo_applied:
+        desc += f" (скидка {promo_applied['discount']}%)"
     payload = {
         "amount": {"value": amount, "currency": "RUB"},
         "confirmation": {
@@ -690,7 +717,7 @@ async def payment_create(req: PaymentReq):
             "return_url": f"{FRONTEND_URL}?payment=success&order={order_id}"
         },
         "capture": True,
-        "description": f"CS2 AI Тренер PRO — {req.plan}",
+        "description": desc,
         "metadata": {"steamid": req.steamid, "plan": req.plan, "order_id": order_id},
     }
     async with httpx.AsyncClient(timeout=15) as client:
@@ -708,10 +735,16 @@ async def payment_create(req: PaymentReq):
         raise HTTPException(status_code=500, detail=data.get("description","Ошибка ЮКассы"))
     pay_url = data.get("confirmation", {}).get("confirmation_url", "")
     payment_id = data.get("id", "")
-    # Сохраняем payment_id для верификации вебхука
     pending_payments[order_id]["payment_id"] = payment_id
-    pending_payments[payment_id] = pending_payments[order_id]  # дубль по payment_id
-    return {"url": pay_url, "order_id": order_id}
+    pending_payments[payment_id] = pending_payments[order_id]
+
+    # Помечаем промокод как использованный после создания платежа
+    if promo_applied:
+        code = promo_applied["code"]
+        promo_codes[code]["uses_left"] -= 1
+        promo_codes[code]["used_by"].append(req.steamid)
+
+    return {"url": pay_url, "order_id": order_id, "final_price": final, "promo": promo_applied}
 
 @app.post("/payment/webhook")
 async def payment_webhook(request: Request):
@@ -880,11 +913,38 @@ async def create_promo(request: Request):
     code = data.get("code", "").upper().strip()
     uses = int(data.get("uses", 1))
     plan = data.get("plan", "month")
+    discount = min(100, max(0, int(data.get("discount", 0))))  # скидка в процентах 0-100
     if not code:
         code = "PROMO-" + "".join(secrets.choice(string.ascii_uppercase+string.digits) for _ in range(6))
-    promo_codes[code] = {"uses_left": uses, "plan": plan, "used_by": [], "created_at": int(time.time())}
-    log_admin("Промокод создан", f"code={code} uses={uses} plan={plan}")
+    promo_codes[code] = {
+        "uses_left": uses, "plan": plan, "discount": discount,
+        "used_by": [], "created_at": int(time.time())
+    }
+    log_admin("Промокод создан", f"code={code} uses={uses} plan={plan} discount={discount}%")
     return {"ok": True, "code": code}
+
+@app.get("/promo/check")
+async def check_promo(code: str, plan: str = "month"):
+    """Проверить промокод и вернуть итоговую сумму"""
+    c = code.upper().strip()
+    if c not in promo_codes:
+        raise HTTPException(status_code=404, detail="Промокод не найден")
+    p = promo_codes[c]
+    if p["uses_left"] <= 0:
+        raise HTTPException(status_code=400, detail="Промокод уже использован")
+    base = 299 if plan == "month" else 1990
+    discount = p.get("discount", 0)
+    final = round(base * (1 - discount / 100))
+    final = max(1, final)  # минимум 1 рубль
+    return {
+        "ok": True,
+        "code": c,
+        "discount": discount,
+        "plan": plan,
+        "base_price": base,
+        "final_price": final,
+        "is_free": discount >= 100,
+    }
 
 @app.post("/promo/activate")
 async def activate_promo(req: PromoReq):
@@ -896,10 +956,14 @@ async def activate_promo(req: PromoReq):
         raise HTTPException(status_code=400, detail="Промокод уже использован")
     if req.steamid in p["used_by"]:
         raise HTTPException(status_code=400, detail="Вы уже использовали этот промокод")
+    discount = p.get("discount", 0)
+    if discount < 100:
+        raise HTTPException(status_code=400, detail="Этот промокод не даёт бесплатный доступ — используй его при оплате")
+    # 100% скидка — активируем PRO бесплатно
     p["uses_left"] -= 1
     p["used_by"].append(req.steamid)
     activate_pro(req.steamid, p["plan"], f"promo_{code}")
-    log_admin("Промокод активирован", f"code={code} steamid={req.steamid}")
+    log_admin("Промокод активирован (бесплатно)", f"code={code} steamid={req.steamid}")
     return {"ok": True, "message": "PRO активирован через промокод!"}
 
 @app.get("/admin/promos")
