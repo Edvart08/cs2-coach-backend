@@ -14,9 +14,8 @@ GROQ_KEY      = os.environ.get("GROQ_API_KEY")
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
 FACEIT_KEY    = os.environ.get("FACEIT_API_KEY")
 ADMIN_TOKEN   = os.environ.get("ADMIN_TOKEN", "change_me_in_render")
-FK_SHOP_ID    = os.environ.get("FREEKASSA_SHOP_ID", "")
-FK_SECRET1    = os.environ.get("FREEKASSA_SECRET1", "")
-FK_SECRET2    = os.environ.get("FREEKASSA_SECRET2", "")
+YOO_SHOP_ID   = os.environ.get("YOOKASSA_SHOP_ID", "135395")  # ShopID из ЮКассы
+YOO_SECRET    = os.environ.get("YOOKASSA_SECRET", "")         # Секретный ключ из ЮКассы → Интеграция → API ключи
 FRONTEND_URL   = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
 TG_BOT_TOKEN   = os.environ.get("TG_BOT_TOKEN", "")
 TG_ADMIN_ID    = os.environ.get("TG_ADMIN_ID", "")
@@ -84,9 +83,6 @@ def gen_key() -> str:
     chars = string.ascii_uppercase + string.digits
     parts = ["".join(secrets.choice(chars) for _ in range(4)) for _ in range(4)]
     return "CS2PRO-" + "-".join(parts)
-
-def fk_sign(amount, order_id, secret):
-    return hashlib.md5(f"{FK_SHOP_ID}:{amount}:{secret}:RUB:{order_id}".encode()).hexdigest()
 
 def activate_pro(steamid: str, plan: str, order_id: str):
     key = gen_key()
@@ -663,45 +659,86 @@ async def analyze_match(req: MatchReq):
 
 
 
-# ── FreeKassa платежи ─────────────────────────────────────────────────────────
+# ── YooMoney платежи ──────────────────────────────────────────────────────────
 class PaymentReq(BaseModel):
     steamid: str
     plan: str = "month"   # month | year
 
 @app.post("/payment/create")
 async def payment_create(req: PaymentReq):
-    if not FK_SHOP_ID:
+    if not YOO_SECRET:
         raise HTTPException(status_code=503, detail="Платежи временно недоступны")
-    amount = 299 if req.plan == "month" else 1990
+    amount = "299.00" if req.plan == "month" else "1990.00"
     order_id = f"{req.steamid}_{int(time.time())}"
-    sign = fk_sign(amount, order_id, FK_SECRET1)
-    pending_payments[order_id] = {"steamid": req.steamid, "plan": req.plan}
-    pay_url = (
-        f"https://pay.freekassa.com/"
-        f"?m={FK_SHOP_ID}&oa={amount}&currency=RUB"
-        f"&o={order_id}&s={sign}&lang=ru"
-        f"&success_url={FRONTEND_URL}?payment=success"
-        f"&failure_url={FRONTEND_URL}?payment=fail"
-    )
+    pending_payments[order_id] = {"steamid": req.steamid, "plan": req.plan, "amount": amount}
+
+    # ЮКасса API — создаём платёж
+    import base64
+    creds = base64.b64encode(f"{YOO_SHOP_ID}:{YOO_SECRET}".encode()).decode()
+    payload = {
+        "amount": {"value": amount, "currency": "RUB"},
+        "confirmation": {
+            "type": "redirect",
+            "return_url": f"{FRONTEND_URL}?payment=success&order={order_id}"
+        },
+        "capture": True,
+        "description": f"CS2 AI Тренер PRO — {req.plan}",
+        "metadata": {"steamid": req.steamid, "plan": req.plan, "order_id": order_id},
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(
+            "https://api.yookassa.ru/v3/payments",
+            headers={
+                "Authorization": f"Basic {creds}",
+                "Content-Type": "application/json",
+                "Idempotence-Key": order_id,
+            },
+            json=payload
+        )
+    data = r.json()
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail=data.get("description","Ошибка ЮКассы"))
+    pay_url = data.get("confirmation", {}).get("confirmation_url", "")
+    payment_id = data.get("id", "")
+    # Сохраняем payment_id для верификации вебхука
+    pending_payments[order_id]["payment_id"] = payment_id
+    pending_payments[payment_id] = pending_payments[order_id]  # дубль по payment_id
     return {"url": pay_url, "order_id": order_id}
 
 @app.post("/payment/webhook")
 async def payment_webhook(request: Request):
+    """ЮКасса webhook уведомление"""
     try:
-        form = await request.form()
-        d = dict(form)
+        data = await request.json()
     except:
-        d = {}
-    merchant_order = d.get("MERCHANT_ORDER_ID", "")
-    amount         = d.get("AMOUNT", "")
-    sign_got       = d.get("SIGN", "")
-    sign_exp       = hashlib.md5(f"{FK_SHOP_ID}:{amount}:{FK_SECRET2}:{merchant_order}".encode()).hexdigest()
-    if sign_got != sign_exp:
-        return HTMLResponse("NO", status_code=400)
-    if merchant_order in pending_payments:
-        p = pending_payments.pop(merchant_order)
-        activate_pro(p["steamid"], p["plan"], merchant_order)
-    return HTMLResponse("YES")
+        return HTMLResponse("BAD REQUEST", status_code=400)
+
+    event = data.get("event", "")
+    obj   = data.get("object", {})
+
+    # Нас интересует только успешный платёж
+    if event != "payment.succeeded":
+        return HTMLResponse("OK")
+
+    payment_id = obj.get("id", "")
+    metadata   = obj.get("metadata", {})
+    steamid    = metadata.get("steamid", "")
+    plan       = metadata.get("plan", "month")
+    order_id   = metadata.get("order_id", "")
+
+    # Проверяем что платёж реально succeeded
+    if obj.get("status") != "succeeded":
+        return HTMLResponse("OK")
+
+    if steamid and order_id:
+        activate_pro(steamid, plan, order_id)
+        # Чистим pending
+        pending_payments.pop(order_id, None)
+        pending_payments.pop(payment_id, None)
+        amount = obj.get("amount", {}).get("value", "?")
+        await _tg_send_bg(f"💰 Оплата получена!\nSteam: {steamid}\nПлан: {plan}\nСумма: {amount} руб\nOrder: {order_id}")
+
+    return HTMLResponse("OK")
 
 @app.get("/payment/status/{steamid}")
 async def payment_status(steamid: str):
