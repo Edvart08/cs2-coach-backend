@@ -1266,40 +1266,53 @@ async def get_steam_matches(steamid: str, limit: int = 8):
         "cs_office":"Office","cs_italy":"Italy",
     }
 
-    async def get_demo_map(match_id: str, reservation_id: str) -> str:
-        """Скачиваем первые 4KB .dem файла и читаем карту из header"""
-        # Steam хранит демки по match_id
-        # URL формат: http://replay{N}.valve.net/730/{match_id}_{reservation_id}.dem.bz2
-        for relay in ["1", "2", "3", "4", "5", "230"]:
-            url = f"http://replay{relay}.valve.net/730/{match_id}_{reservation_id}.dem.bz2"
-            try:
-                async with httpx.AsyncClient(timeout=5) as c:
-                    r = await c.get(url, headers={"Range": "bytes=0-8191"})
-                    if r.status_code in (200, 206):
+    async def get_demo_map(match_id: str, tv_port: int) -> str:
+        """Скачиваем .dem.bz2 header или .dem.info файл для получения карты"""
+        MAP_NAMES_INNER = {
+            "de_dust2":"Dust2","de_mirage":"Mirage","de_inferno":"Inferno",
+            "de_nuke":"Nuke","de_overpass":"Overpass","de_ancient":"Ancient",
+            "de_anubis":"Anubis","de_vertigo":"Vertigo","de_cache":"Cache",
+            "de_train":"Train","de_cbble":"Cobblestone",
+            "cs_office":"Office","cs_italy":"Italy",
+        }
+        # Формат URL: http://replay{N}.valve.net/730/00{matchId}_{tvPort}.dem.bz2
+        # N — номер relay сервера (1-500+)
+        # tvPort — из декодированного sharing code
+        filename = f"00{match_id}_{tv_port}"
+        
+        # Пробуем сначала .info файл (маленький, ~200 байт, содержит карту)
+        for relay in ["1","2","3","4","5","100","200","300","382","400"]:
+            for ext in [".dem.bz2.info", ".dem.bz2"]:
+                url = f"http://replay{relay}.valve.net/730/{filename}{ext}"
+                try:
+                    headers = {"Range": "bytes=0-1023"} if ext == ".dem.bz2" else {}
+                    async with httpx.AsyncClient(timeout=4) as c:
+                        r = await c.get(url, headers=headers)
+                        if r.status_code not in (200, 206):
+                            continue
                         data = r.content
-                        # .dem файл начинается с header:
-                        # 8 bytes magic "HL2DEMO\x00"
-                        # 4 bytes demo_protocol
-                        # 4 bytes network_protocol
-                        # 260 bytes server_name
-                        # 260 bytes client_name
-                        # 260 bytes map_name  ← нам нужно это
-                        # Если bz2 — распаковываем начало
-                        if data[:2] == b'BZ':
+                        
+                        if ext == ".dem.bz2.info":
+                            # .info файл — текст или protobuf с именем карты
+                            text = data.decode("utf-8", "ignore")
+                            for key in MAP_NAMES_INNER:
+                                if key in text:
+                                    return MAP_NAMES_INNER[key]
+                        else:
+                            # .dem.bz2 — распаковываем header
                             import bz2
                             try:
-                                data = bz2.decompress(data[:8192])
+                                raw = bz2.decompress(data)
                             except Exception:
-                                # Частичная распаковка — пробуем напрямую
-                                pass
-                        if data[:7] == b'HL2DEMO':
-                            # map_name начинается с offset 8+4+4+260+260 = 536
-                            map_raw = data[536:536+260]
-                            map_name = map_raw.split(b'\x00')[0].decode('utf-8','ignore').strip()
-                            if map_name.startswith('de_') or map_name.startswith('cs_'):
-                                return MAP_NAMES.get(map_name, map_name.replace('de_','').replace('cs_','').capitalize())
-            except Exception:
-                continue
+                                raw = data
+                            if raw[:7] == b'HL2DEMO':
+                                map_raw = raw[536:536+260]
+                                map_name = map_raw.split(b'\x00')[0].decode('utf-8','ignore').strip()
+                                if map_name:
+                                    return MAP_NAMES_INNER.get(map_name, 
+                                        map_name.replace('de_','').replace('cs_','').capitalize())
+                except Exception:
+                    continue
         return ""
 
     async with httpx.AsyncClient(timeout=15) as client:
@@ -1309,7 +1322,7 @@ async def get_steam_matches(steamid: str, limit: int = 8):
 
             decoded = decode_sharing_code(current_code)
             match_id = decoded.get("matchid", "")
-            reservation_id = decoded.get("reservationid", "")
+            tv_port = decoded.get("tvport", 0)
 
             match_entry = {
                 "code": current_code,
@@ -1320,8 +1333,8 @@ async def get_steam_matches(steamid: str, limit: int = 8):
             }
 
             # Пробуем получить карту из .dem header
-            if match_id and reservation_id:
-                map_name = await get_demo_map(match_id, reservation_id)
+            if match_id and match_id != "0":
+                map_name = await get_demo_map(match_id, tv_port)
                 if map_name:
                     match_entry["map"] = map_name
 
