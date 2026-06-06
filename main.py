@@ -14,7 +14,7 @@ GROQ_KEY      = os.environ.get("GROQ_API_KEY")
 STEAM_API_KEY = os.environ.get("STEAM_API_KEY")
 FACEIT_KEY    = os.environ.get("FACEIT_API_KEY")
 ADMIN_TOKEN   = os.environ.get("ADMIN_TOKEN", "change_me_in_render")
-YOO_SHOP_ID   = os.environ.get("YOOKASSA_SHOP_ID", "135395")  # ShopID из ЮКассы
+YOO_SHOP_ID   = os.environ.get("YOOKASSA_SHOP_ID", "1376791")  # ShopID из ЮКассы
 YOO_SECRET    = os.environ.get("YOOKASSA_SECRET", "")         # Секретный ключ из ЮКассы → Интеграция → API ключи
 FRONTEND_URL   = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
 TG_BOT_TOKEN   = os.environ.get("TG_BOT_TOKEN", "")
@@ -29,6 +29,13 @@ support_sessions  = {}   # steamid -> {username, msgs:[{from,text,ts}]}
 admin_active      = {}   # tg_user_id -> steamid (текущий пользователь в диалоге)
 lb_rate_limit     = {}   # steamid -> last_add timestamp (rate limit для лидерборда)
 analyze_rate_limit= {}   # steamid -> last_analyze timestamp
+promo_codes       = {}   # code -> {discount, uses_left, used_by:[steamid]}
+admin_logs        = []   # [{ts, action, detail}] последние 200 событий
+
+def log_admin(action: str, detail: str = ""):
+    admin_logs.insert(0, {"ts": int(time.time()), "action": action, "detail": detail})
+    if len(admin_logs) > 200:
+        admin_logs.pop()
 
 # ── Persistence — файловое хранилище ──────────────────────────────────────────
 DATA_DIR = "/tmp/cs2coach_data"
@@ -91,6 +98,7 @@ def activate_pro(steamid: str, plan: str, order_id: str):
     pro_keys[key] = {"used": True, "steamid": steamid}
     pro_users[steamid] = {"key": key, "activated_at": int(time.time()), "plan": plan, "order": order_id}
     _save("pro_users", pro_users)
+    log_admin("PRO активирован", f"steamid={steamid} plan={plan} order={order_id}")
 
 
     return {"Authorization": f"Bearer {FACEIT_KEY}"} if FACEIT_KEY else {}
@@ -779,6 +787,8 @@ async def generate_keys(request: Request, n: int = 1):
             k = gen_key()
         pro_keys[k] = {"used": False, "steamid": None}
         keys.append(k)
+    _save("pro_keys", pro_keys)
+    log_admin("Ключи сгенерированы", f"количество={n}")
     return {"keys": keys}
 
 @app.get("/admin/keys/list")
@@ -787,6 +797,116 @@ async def list_keys(request: Request):
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
     return {"keys": pro_keys, "pro_users": pro_users}
+
+@app.post("/admin/grant-pro")
+async def grant_pro(request: Request):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    steamid = data.get("steamid","")
+    plan = data.get("plan","manual")
+    if not steamid:
+        raise HTTPException(status_code=400, detail="steamid required")
+    activate_pro(steamid, plan, f"manual_{int(time.time())}")
+    return {"ok": True, "message": f"PRO выдан для {steamid}"}
+
+@app.post("/admin/revoke-pro")
+async def revoke_pro(request: Request):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    steamid = data.get("steamid","")
+    if steamid in pro_users:
+        del pro_users[steamid]
+        _save("pro_users", pro_users)
+        log_admin("PRO отозван", f"steamid={steamid}")
+    return {"ok": True}
+
+@app.get("/admin/stats")
+async def admin_stats(token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    now = int(time.time())
+    day = 86400
+    analyses_today = sum(1 for sid, hist in analysis_history.items() for h in hist if now - h.get("timestamp",0) < day)
+    new_users_today = sum(1 for sid, hist in analysis_history.items() if hist and now - hist[-1].get("timestamp",0) < day)
+    return {
+        "total_users": len(analysis_history),
+        "pro_users_count": len(pro_users),
+        "leaderboard_count": len(leaderboard),
+        "analyses_today": analyses_today,
+        "new_users_today": new_users_today,
+        "total_keys": len(pro_keys),
+        "unused_keys": sum(1 for k,v in pro_keys.items() if not v.get("used")),
+        "promo_codes_count": len(promo_codes),
+        "pending_payments": len(pending_payments),
+    }
+
+@app.get("/admin/logs")
+async def admin_get_logs(token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return {"logs": admin_logs[:100]}
+
+@app.get("/admin/users")
+async def admin_users(token: str = "", limit: int = 50):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    users = []
+    for steamid, hist in list(analysis_history.items())[:limit]:
+        last = hist[0] if hist else {}
+        users.append({
+            "steamid": steamid,
+            "analyses": len(hist),
+            "last_seen": last.get("timestamp", 0),
+            "is_pro": is_pro(steamid),
+            "last_stats": last.get("stats", {}),
+        })
+    users.sort(key=lambda x: x["last_seen"], reverse=True)
+    return {"users": users, "total": len(analysis_history)}
+
+class PromoReq(BaseModel):
+    code: str
+    steamid: str
+
+@app.post("/admin/promo/create")
+async def create_promo(request: Request):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    code = data.get("code", "").upper().strip()
+    uses = int(data.get("uses", 1))
+    plan = data.get("plan", "month")
+    if not code:
+        code = "PROMO-" + "".join(secrets.choice(string.ascii_uppercase+string.digits) for _ in range(6))
+    promo_codes[code] = {"uses_left": uses, "plan": plan, "used_by": [], "created_at": int(time.time())}
+    log_admin("Промокод создан", f"code={code} uses={uses} plan={plan}")
+    return {"ok": True, "code": code}
+
+@app.post("/promo/activate")
+async def activate_promo(req: PromoReq):
+    code = req.code.upper().strip()
+    if code not in promo_codes:
+        raise HTTPException(status_code=404, detail="Промокод не найден")
+    p = promo_codes[code]
+    if p["uses_left"] <= 0:
+        raise HTTPException(status_code=400, detail="Промокод уже использован")
+    if req.steamid in p["used_by"]:
+        raise HTTPException(status_code=400, detail="Вы уже использовали этот промокод")
+    p["uses_left"] -= 1
+    p["used_by"].append(req.steamid)
+    activate_pro(req.steamid, p["plan"], f"promo_{code}")
+    log_admin("Промокод активирован", f"code={code} steamid={req.steamid}")
+    return {"ok": True, "message": "PRO активирован через промокод!"}
+
+@app.get("/admin/promos")
+async def list_promos(token: str = ""):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return {"promos": promo_codes}
 
 class SupportReq(BaseModel):
     message: str
