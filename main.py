@@ -398,7 +398,8 @@ async def get_profile(steamid: str):
     faceit = await faceit_full(steam_id=steamid)
     return {"steamid":steamid, **profile,
             "faceit": faceit if "error" not in faceit else None,
-            "cs2": cs2, "history": analysis_history.get(steamid,[])[:5]}
+            "cs2": cs2, "history": analysis_history.get(steamid,[])[:5],
+            "is_pro": is_pro(steamid)}
 
 # ── Analyze ───────────────────────────────────────────────────────────────────
 @app.post("/analyze")
@@ -466,14 +467,19 @@ level = одно из: Новичок, Средний, Хороший, Про"""
 # ── Leaderboard / History ─────────────────────────────────────────────────────
 @app.get("/leaderboard")
 def get_leaderboard():
-    # Сортируем по overall рейтингу (число), fallback на kd
     def sort_key(x):
         try: return int(x.get("overall", 0) or 0)
         except: 
             try: return float(x.get("stats",{}).get("kd",0) or 0)
             except: return 0
     s = sorted(leaderboard, key=sort_key, reverse=True)
-    return {"leaderboard": s[:100], "total": len(leaderboard)}
+    # Добавляем is_pro флаг к каждому игроку
+    result = []
+    for entry in s[:100]:
+        e = dict(entry)
+        e["is_pro"] = is_pro(e.get("steamid",""))
+        result.append(e)
+    return {"leaderboard": result, "total": len(leaderboard)}
 
 @app.post("/leaderboard/add")
 async def add_lb(entry: LBEntry):
