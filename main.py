@@ -1246,8 +1246,8 @@ async def auto_connect_steam(request: Request):
 
 
 @app.get("/steam/matches/{steamid}")
-async def get_steam_matches(steamid: str, limit: int = 8):
-    """Получаем историю матчей через sharing codes + карта из .dem header"""
+async def get_steam_matches(steamid: str, limit: int = 10):
+    """Получаем историю матчей через sharing codes — быстро, без скачивания демок"""
     if steamid not in steam_auth_codes:
         raise HTTPException(status_code=404, detail="Auth код не найден.")
     if not STEAM_API_KEY:
@@ -1258,87 +1258,19 @@ async def get_steam_matches(steamid: str, limit: int = 8):
     matches = []
     current_code = info["last_code"]
 
-    MAP_NAMES = {
-        "de_dust2":"Dust2","de_mirage":"Mirage","de_inferno":"Inferno",
-        "de_nuke":"Nuke","de_overpass":"Overpass","de_ancient":"Ancient",
-        "de_anubis":"Anubis","de_vertigo":"Vertigo","de_cache":"Cache",
-        "de_train":"Train","de_cbble":"Cobblestone","de_shortdust":"Dust2 Short",
-        "cs_office":"Office","cs_italy":"Italy",
-    }
-
-    async def get_demo_map(match_id: str, tv_port: int) -> str:
-        """Скачиваем .dem.bz2 header или .dem.info файл для получения карты"""
-        MAP_NAMES_INNER = {
-            "de_dust2":"Dust2","de_mirage":"Mirage","de_inferno":"Inferno",
-            "de_nuke":"Nuke","de_overpass":"Overpass","de_ancient":"Ancient",
-            "de_anubis":"Anubis","de_vertigo":"Vertigo","de_cache":"Cache",
-            "de_train":"Train","de_cbble":"Cobblestone",
-            "cs_office":"Office","cs_italy":"Italy",
-        }
-        # Формат URL: http://replay{N}.valve.net/730/00{matchId}_{tvPort}.dem.bz2
-        # N — номер relay сервера (1-500+)
-        # tvPort — из декодированного sharing code
-        filename = f"00{match_id}_{tv_port}"
-        
-        # Пробуем сначала .info файл (маленький, ~200 байт, содержит карту)
-        for relay in ["1","2","3","4","5","100","200","300","382","400"]:
-            for ext in [".dem.bz2.info", ".dem.bz2"]:
-                url = f"http://replay{relay}.valve.net/730/{filename}{ext}"
-                try:
-                    headers = {"Range": "bytes=0-1023"} if ext == ".dem.bz2" else {}
-                    async with httpx.AsyncClient(timeout=4) as c:
-                        r = await c.get(url, headers=headers)
-                        if r.status_code not in (200, 206):
-                            continue
-                        data = r.content
-                        
-                        if ext == ".dem.bz2.info":
-                            # .info файл — текст или protobuf с именем карты
-                            text = data.decode("utf-8", "ignore")
-                            for key in MAP_NAMES_INNER:
-                                if key in text:
-                                    return MAP_NAMES_INNER[key]
-                        else:
-                            # .dem.bz2 — распаковываем header
-                            import bz2
-                            try:
-                                raw = bz2.decompress(data)
-                            except Exception:
-                                raw = data
-                            if raw[:7] == b'HL2DEMO':
-                                map_raw = raw[536:536+260]
-                                map_name = map_raw.split(b'\x00')[0].decode('utf-8','ignore').strip()
-                                if map_name:
-                                    return MAP_NAMES_INNER.get(map_name, 
-                                        map_name.replace('de_','').replace('cs_','').capitalize())
-                except Exception:
-                    continue
-        return ""
-
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         for _ in range(limit):
             if not current_code or current_code == "n/a":
                 break
 
             decoded = decode_sharing_code(current_code)
             match_id = decoded.get("matchid", "")
-            tv_port = decoded.get("tvport", 0)
 
-            match_entry = {
+            matches.append({
                 "code": current_code,
                 "match_id": match_id,
-                "map": "",
-                "score": "",
-                "date": "",
-            }
-
-            # Пробуем получить карту из .dem header
-            if match_id and match_id != "0":
-                map_name = await get_demo_map(match_id, tv_port)
-                if map_name:
-                    match_entry["map"] = map_name
-
-            matches.append(match_entry)
+                "map": "",   # карту без демки получить нельзя
+            })
 
             # Следующий код
             r = await client.get(
