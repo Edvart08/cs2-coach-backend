@@ -141,21 +141,55 @@ class LBEntry(BaseModel):
 async def steam_profile(steam_id, client):
     if not STEAM_API_KEY:
         return {"username":"Unknown","avatar":"","created":None,"steam_level":None}
-    sr = await client.get(f"https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/",
-        params={"key":STEAM_API_KEY,"steamids":steam_id})
-    players = sr.json().get("response",{}).get("players",[])
+    import asyncio
+    tasks = [
+        client.get("https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/",
+            params={"key":STEAM_API_KEY,"steamids":steam_id}),
+        client.get("https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/",
+            params={"key":STEAM_API_KEY,"steamid":steam_id}),
+        client.get("https://api.steampowered.com/ISteamUser/GetFriendList/v0001/",
+            params={"key":STEAM_API_KEY,"steamid":steam_id,"relationship":"friend"}),
+        client.get("https://api.steampowered.com/IPlayerService/GetBadges/v1/",
+            params={"key":STEAM_API_KEY,"steamid":steam_id}),
+        client.get("https://api.steampowered.com/ISteamUser/GetPlayerBans/v1/",
+            params={"key":STEAM_API_KEY,"steamids":steam_id}),
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    sr, lr, fr, br, banr = results
+    players = sr.json().get("response",{}).get("players",[]) if not isinstance(sr, Exception) else []
     if not players:
         return {"username":"Unknown","avatar":"","created":None,"steam_level":None}
     p = players[0]
-    lr = await client.get("https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/",
-        params={"key":STEAM_API_KEY,"steamid":steam_id})
+    steam_level = lr.json().get("response",{}).get("player_level") if not isinstance(lr, Exception) else None
+    friend_count = 0
+    if not isinstance(fr, Exception):
+        try: friend_count = len(fr.json().get("friendslist",{}).get("friends",[]))
+        except: pass
+    badge_count, player_xp = 0, 0
+    if not isinstance(br, Exception):
+        try:
+            bd = br.json().get("response",{})
+            badge_count = len(bd.get("badges",[])); player_xp = bd.get("player_xp",0)
+        except: pass
+    vac_banned = game_banned = False
+    if not isinstance(banr, Exception):
+        try:
+            bans = banr.json().get("players",[{}])[0]
+            vac_banned = bans.get("VACBanned",False); game_banned = bans.get("NumberOfGameBans",0)>0
+        except: pass
     return {
         "username": p.get("personaname","Unknown"),
         "avatar": p.get("avatarfull",""),
         "created": p.get("timecreated"),
-        "steam_level": lr.json().get("response",{}).get("player_level"),
+        "steam_level": steam_level,
         "profile_url": p.get("profileurl",""),
         "country": p.get("loccountrycode",""),
+        "real_name": p.get("realname",""),
+        "vac_banned": vac_banned,
+        "game_banned": game_banned,
+        "friend_count": friend_count,
+        "badge_count": badge_count,
+        "player_xp": player_xp,
     }
 
 async def steam_cs2(steam_id, client):
@@ -166,42 +200,43 @@ async def steam_cs2(steam_id, client):
     raw = {s["name"]:s["value"] for s in gr.json().get("playerstats",{}).get("stats",[])}
     if not raw:
         return {"private": True}
-    k,d = raw.get("total_kills",0), raw.get("total_deaths",1)
-    w,m = raw.get("total_wins",0), raw.get("total_matches_played",0)
-    hk  = raw.get("total_kills_headshot",0)
-    kd  = round(k/max(d,1), 2)
-    # Steam API иногда возвращает total_wins как победы в раундах, а не матчах.
-    # Если w > m — значит это раунды. CS матч = ~16 раундов, делим на 16 для оценки.
-    # Дополнительный кап: WR > 75% при 500+ матчах — неправдоподобно, капируем.
-    if m >= 10:
-        raw_wr = round(w / max(m, 1) * 100)
-        if raw_wr > 100:
-            # w — это раунды, не матчи
-            raw_wr = round(w / max(m * 16, 1) * 100)
-        if raw_wr > 80 and m >= 100:
-            raw_wr = 80  # хард-кап: 80% при 100+ матчах — потолок доверия
-        wr = min(79, max(0, raw_wr))
-    else:
-        wr = 0
-    hs  = min(100, round(hk/max(k,1)*100)) if k > 0 else 0
-    # Playtime from GetOwnedGames
-    playtime_min = 0
+    k=raw.get("total_kills",0); d=raw.get("total_deaths",1)
+    w=raw.get("total_wins",0); m=raw.get("total_matches_played",0)
+    hk=raw.get("total_kills_headshot",0)
+    shots_fired=raw.get("total_shots_fired",0); shots_hit=raw.get("total_shots_hit",0)
+    kd = round(k/max(d,1),2)
+    if m>=10:
+        raw_wr=round(w/max(m,1)*100)
+        if raw_wr>100: raw_wr=round(w/max(m*16,1)*100)
+        if raw_wr>80 and m>=100: raw_wr=80
+        wr=min(79,max(0,raw_wr))
+    else: wr=0
+    hs=min(100,round(hk/max(k,1)*100)) if k>0 else 0
+    accuracy=round(shots_hit/max(shots_fired,1)*100) if shots_fired>0 else 0
+    playtime_min=0
     try:
-        pg = await client.get("https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
+        pg=await client.get("https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/",
             params={"key":STEAM_API_KEY,"steamid":steam_id,"appids_filter[0]":730,
                     "include_appinfo":"false","include_played_free_games":"true"})
         for g in pg.json().get("response",{}).get("games",[]):
-            if g.get("appid")==730:
-                playtime_min = g.get("playtime_forever",0)
-                break
+            if g.get("appid")==730: playtime_min=g.get("playtime_forever",0); break
     except: pass
     return {
-        "private": False,
-        "kd": f"{kd:.2f}", "winrate": str(wr),
-        "hs": str(hs), "matches": str(m),
-        "kills": str(k), "deaths": str(d), "wins": str(w),
-        "mvps": str(raw.get("total_mvps",0)),
-        "playtime": str(playtime_min),
+        "private":False,
+        "kd":f"{kd:.2f}","winrate":str(wr),"hs":str(hs),"matches":str(m),
+        "kills":str(k),"deaths":str(d),"wins":str(w),
+        "mvps":str(raw.get("total_mvps",0)),"playtime":str(playtime_min),
+        "accuracy":str(accuracy),
+        "knife_kills":str(raw.get("total_kills_knife",0)),
+        "pistol_kills":str(raw.get("total_kills_pistols",0)),
+        "sniper_kills":str(raw.get("total_kills_snipers",0)),
+        "grenade_kills":str(raw.get("total_kills_grenade",0)),
+        "blind_kills":str(raw.get("total_kills_enemy_blinded",0)),
+        "dominated":str(raw.get("total_dominations",0)),
+        "revenges":str(raw.get("total_revenges",0)),
+        "bombs_planted":str(raw.get("total_planted_bombs",0)),
+        "bombs_defused":str(raw.get("total_defused_bombs",0)),
+        "rounds_pistol_won":str(raw.get("total_wins_pistolround",0)),
     }
 
 # ── FACEIT helpers ────────────────────────────────────────────────────────────
