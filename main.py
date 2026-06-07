@@ -63,6 +63,7 @@ leaderboard      = _load("leaderboard", [])
 pro_users        = _load("pro_users", {})
 pro_keys         = _load("pro_keys", {})
 ai_usage         = _load("ai_usage", {})
+banned_users     = _load("banned_users", {})
 
 # Если pro_users пустой (Render рестартнул) — пробуем восстановить из GitHub backup
 async def restore_from_github():
@@ -78,7 +79,7 @@ async def restore_from_github():
                 if data.get("pro_users"):   pro_users  = data["pro_users"];  _save("pro_users", pro_users)
                 if data.get("pro_keys"):    pro_keys   = data["pro_keys"];   _save("pro_keys", pro_keys)
                 if data.get("leaderboard"): leaderboard = data["leaderboard"]; _save("leaderboard", leaderboard)
-                if data.get("banned_users"): banned_users = data["banned_users"]
+                if data.get("banned_users"): banned_users = data["banned_users"]; _save("banned_users", banned_users)
                 print(f"[RESTORE] PRO: {len(pro_users)}, banned: {len(banned_users)}")
     except Exception as e:
         print(f"[RESTORE] Ошибка: {e}")
@@ -1058,6 +1059,7 @@ async def ban_user(request: Request):
     if not steamid:
         raise HTTPException(status_code=400, detail="steamid required")
     banned_users[steamid] = {"reason": reason, "banned_at": int(time.time())}
+    _save("banned_users", banned_users)
     log_admin("Пользователь забанен", f"steamid={steamid} reason={reason}")
     return {"ok": True}
 
@@ -1070,6 +1072,7 @@ async def unban_user(request: Request):
     steamid = data.get("steamid","")
     if steamid in banned_users:
         del banned_users[steamid]
+        _save("banned_users", banned_users)
     log_admin("Пользователь разбанен", f"steamid={steamid}")
     return {"ok": True}
 
@@ -1505,7 +1508,7 @@ async def admin_restore(request: Request, token: str = ""):
     if "ai_usage" in data:
         ai_usage = data["ai_usage"]; _save("ai_usage", ai_usage)
     if "banned_users" in data:
-        banned_users = data["banned_users"]
+        banned_users = data["banned_users"]; _save("banned_users", banned_users)
     return {"ok": True, "restored": list(data.keys())}
 
 @app.get("/share/{steamid}", response_class=HTMLResponse)
