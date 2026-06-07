@@ -429,6 +429,11 @@ async def faceit_by_steam(steamid: str):
 # ── Profile ───────────────────────────────────────────────────────────────────
 @app.get("/profile/{steamid}")
 async def get_profile(steamid: str):
+    # Проверяем бан
+    if steamid in banned_users:
+        b = banned_users[steamid]
+        raise HTTPException(status_code=403, detail=f"Аккаунт заблокирован. Причина: {b.get('reason','Нарушение правил')}")
+    
     async with httpx.AsyncClient(timeout=12) as client:
         profile = await steam_profile(steamid, client)
         cs2     = await steam_cs2(steamid, client)
@@ -461,6 +466,10 @@ async def get_profile(steamid: str):
 @app.post("/analyze")
 async def analyze(stats: Stats):
     if stats.steamid:
+        # Проверяем бан
+        if stats.steamid in banned_users:
+            b = banned_users[stats.steamid]
+            return {"error": "banned", "result": f"Аккаунт заблокирован. Причина: {b.get('reason','Нарушение правил')}"}
         usage = check_usage(stats.steamid)
         if usage["remaining"] == 0:
             return {"error": "limit_reached", "result": ""}
@@ -1469,6 +1478,7 @@ def admin_backup(token: str = ""):
         "pro_users": pro_users,
         "pro_keys": pro_keys,
         "ai_usage": ai_usage,
+        "banned_users": banned_users,
     }
 
 @app.post("/admin/restore")
@@ -1476,7 +1486,7 @@ async def admin_restore(request: Request, token: str = ""):
     """Восстанавливает данные из backup"""
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="forbidden")
-    global leaderboard, pro_users, pro_keys, ai_usage
+    global leaderboard, pro_users, pro_keys, ai_usage, banned_users
     data = await request.json()
     if "leaderboard" in data:
         leaderboard = data["leaderboard"]; _save("leaderboard", leaderboard)
@@ -1486,6 +1496,8 @@ async def admin_restore(request: Request, token: str = ""):
         pro_keys = data["pro_keys"]; _save("pro_keys", pro_keys)
     if "ai_usage" in data:
         ai_usage = data["ai_usage"]; _save("ai_usage", ai_usage)
+    if "banned_users" in data:
+        banned_users = data["banned_users"]
     return {"ok": True, "restored": list(data.keys())}
 
 @app.get("/share/{steamid}", response_class=HTMLResponse)
