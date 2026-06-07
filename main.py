@@ -31,6 +31,8 @@ lb_rate_limit     = {}   # steamid -> last_add timestamp (rate limit для ли
 analyze_rate_limit= {}   # steamid -> last_analyze timestamp
 promo_codes       = {}   # code -> {discount, uses_left, used_by:[steamid]}
 admin_logs        = []   # [{ts, action, detail}] последние 200 событий
+user_visits       = {}   # steamid -> {username, avatar, first_seen, last_seen, visit_count, stats}
+banned_users      = {}   # steamid -> {reason, banned_at, banned_by}
 
 def log_admin(action: str, detail: str = ""):
     admin_logs.insert(0, {"ts": int(time.time()), "action": action, "detail": detail})
@@ -431,6 +433,25 @@ async def get_profile(steamid: str):
         profile = await steam_profile(steamid, client)
         cs2     = await steam_cs2(steamid, client)
     faceit = await faceit_full(steam_id=steamid)
+    
+    # Трекинг визита пользователя
+    now = int(time.time())
+    if steamid not in user_visits:
+        user_visits[steamid] = {
+            "username": profile.get("username",""),
+            "avatar": profile.get("avatar",""),
+            "first_seen": now,
+            "last_seen": now,
+            "visit_count": 1,
+            "country": profile.get("country",""),
+            "steam_level": profile.get("steam_level"),
+        }
+    else:
+        user_visits[steamid]["last_seen"] = now
+        user_visits[steamid]["visit_count"] = user_visits[steamid].get("visit_count",0) + 1
+        user_visits[steamid]["username"] = profile.get("username", user_visits[steamid].get("username",""))
+        user_visits[steamid]["avatar"] = profile.get("avatar", user_visits[steamid].get("avatar",""))
+    
     return {"steamid":steamid, **profile,
             "faceit": faceit if "error" not in faceit else None,
             "cs2": cs2, "history": analysis_history.get(steamid,[])[:5],
@@ -519,11 +540,30 @@ def get_leaderboard():
 @app.post("/leaderboard/add")
 async def add_lb(entry: LBEntry):
     global leaderboard, lb_rate_limit
-    # Rate limit: один апдейт на steamid не чаще раза в 30 минут
     now = time.time()
+    
+    # Трекинг пользователя при каждом leaderboard/add
+    steamid = entry.steamid
+    if steamid:
+        if steamid not in user_visits:
+            user_visits[steamid] = {
+                "username": entry.username or "",
+                "avatar": entry.avatar or "",
+                "first_seen": int(now),
+                "last_seen": int(now),
+                "visit_count": 1,
+                "country": "",
+                "steam_level": None,
+            }
+        else:
+            user_visits[steamid]["last_seen"] = int(now)
+            user_visits[steamid]["visit_count"] = user_visits[steamid].get("visit_count",0) + 1
+            if entry.username: user_visits[steamid]["username"] = entry.username
+            if entry.avatar:   user_visits[steamid]["avatar"] = entry.avatar
+
+    # Rate limit: один апдейт на steamid не чаще раза в 30 минут
     last = lb_rate_limit.get(entry.steamid, 0)
     if now - last < 1800:
-        # Всё равно возвращаем текущий rank — просто не обновляем
         def sort_key_r(x):
             try: return int(x.get("overall", 0) or 0)
             except:
@@ -948,21 +988,82 @@ async def admin_get_logs(token: str = ""):
     return {"logs": admin_logs[:100]}
 
 @app.get("/admin/users")
-async def admin_users(token: str = "", limit: int = 50):
+async def admin_users(token: str = "", limit: int = 100):
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
+    
+    # Собираем всех пользователей из всех источников
+    all_steamids = set()
+    all_steamids.update(user_visits.keys())
+    all_steamids.update(analysis_history.keys())
+    all_steamids.update(e.get("steamid","") for e in leaderboard if e.get("steamid"))
+    all_steamids.update(pro_users.keys())
+    all_steamids.discard("")
+    
     users = []
-    for steamid, hist in list(analysis_history.items())[:limit]:
-        last = hist[0] if hist else {}
+    for steamid in all_steamids:
+        visit = user_visits.get(steamid, {})
+        hist  = analysis_history.get(steamid, [])
+        lb_entry = next((e for e in leaderboard if e.get("steamid")==steamid), {})
+        last_ts = max(
+            visit.get("last_seen", 0),
+            hist[0].get("timestamp", 0) if hist else 0
+        )
         users.append({
             "steamid": steamid,
+            "username": visit.get("username") or lb_entry.get("username",""),
+            "avatar": visit.get("avatar") or lb_entry.get("avatar",""),
+            "country": visit.get("country",""),
+            "steam_level": visit.get("steam_level"),
+            "first_seen": visit.get("first_seen", 0),
+            "last_seen": last_ts,
+            "visit_count": visit.get("visit_count", 0),
             "analyses": len(hist),
-            "last_seen": last.get("timestamp", 0),
             "is_pro": is_pro(steamid),
-            "last_stats": last.get("stats", {}),
+            "is_banned": steamid in banned_users,
+            "ban_reason": banned_users.get(steamid,{}).get("reason",""),
+            "kd": lb_entry.get("stats",{}).get("kd",""),
+            "matches": lb_entry.get("stats",{}).get("matches",""),
+            "faceit_level": lb_entry.get("level",""),
         })
+    
     users.sort(key=lambda x: x["last_seen"], reverse=True)
-    return {"users": users, "total": len(analysis_history)}
+    return {"users": users[:limit], "total": len(users)}
+
+@app.post("/admin/ban-user")
+async def ban_user(request: Request):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    steamid = data.get("steamid","")
+    reason  = data.get("reason","Нарушение правил")
+    if not steamid:
+        raise HTTPException(status_code=400, detail="steamid required")
+    banned_users[steamid] = {"reason": reason, "banned_at": int(time.time())}
+    log_admin("Пользователь забанен", f"steamid={steamid} reason={reason}")
+    return {"ok": True}
+
+@app.post("/admin/unban-user")
+async def unban_user(request: Request):
+    token = request.headers.get("x-admin-token","")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    data = await request.json()
+    steamid = data.get("steamid","")
+    if steamid in banned_users:
+        del banned_users[steamid]
+    log_admin("Пользователь разбанен", f"steamid={steamid}")
+    return {"ok": True}
+
+@app.get("/check-ban/{steamid}")
+async def check_ban(steamid: str):
+    if steamid in banned_users:
+        b = banned_users[steamid]
+        raise HTTPException(status_code=403, detail=f"Аккаунт заблокирован. Причина: {b.get('reason','')}")
+    return {"ok": True}
+
+
 
 class PromoReq(BaseModel):
     code: str
