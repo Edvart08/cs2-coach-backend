@@ -66,7 +66,7 @@ ai_usage         = _load("ai_usage", {})
 
 # Если pro_users пустой (Render рестартнул) — пробуем восстановить из GitHub backup
 async def restore_from_github():
-    global pro_users, pro_keys, leaderboard, ai_usage
+    global pro_users, pro_keys, leaderboard, ai_usage, banned_users
     GITHUB_BACKUP_URL = os.environ.get("GITHUB_BACKUP_URL", "")
     if not GITHUB_BACKUP_URL or pro_users:
         return
@@ -75,10 +75,11 @@ async def restore_from_github():
             r = await client.get(GITHUB_BACKUP_URL)
             if r.status_code == 200:
                 data = r.json()
-                if data.get("pro_users"): pro_users = data["pro_users"]; _save("pro_users", pro_users)
-                if data.get("pro_keys"):  pro_keys  = data["pro_keys"];  _save("pro_keys", pro_keys)
+                if data.get("pro_users"):   pro_users  = data["pro_users"];  _save("pro_users", pro_users)
+                if data.get("pro_keys"):    pro_keys   = data["pro_keys"];   _save("pro_keys", pro_keys)
                 if data.get("leaderboard"): leaderboard = data["leaderboard"]; _save("leaderboard", leaderboard)
-                print(f"[RESTORE] Восстановлено из backup: {len(pro_users)} PRO users")
+                if data.get("banned_users"): banned_users = data["banned_users"]
+                print(f"[RESTORE] PRO: {len(pro_users)}, banned: {len(banned_users)}")
     except Exception as e:
         print(f"[RESTORE] Ошибка: {e}")
 
@@ -976,10 +977,16 @@ async def admin_stats(token: str = ""):
         raise HTTPException(status_code=403, detail="Forbidden")
     now = int(time.time())
     day = 86400
+    all_users = set()
+    all_users.update(user_visits.keys())
+    all_users.update(analysis_history.keys())
+    all_users.update(e.get("steamid","") for e in leaderboard if e.get("steamid"))
+    all_users.update(pro_users.keys())
+    all_users.discard("")
     analyses_today = sum(1 for sid, hist in analysis_history.items() for h in hist if now - h.get("timestamp",0) < day)
-    new_users_today = sum(1 for sid, hist in analysis_history.items() if hist and now - hist[-1].get("timestamp",0) < day)
+    new_users_today = sum(1 for sid, v in user_visits.items() if now - v.get("first_seen",0) < day)
     return {
-        "total_users": len(analysis_history),
+        "total_users": len(all_users),
         "pro_users_count": len(pro_users),
         "leaderboard_count": len(leaderboard),
         "analyses_today": analyses_today,
@@ -988,6 +995,7 @@ async def admin_stats(token: str = ""):
         "unused_keys": sum(1 for k,v in pro_keys.items() if not v.get("used")),
         "promo_codes_count": len(promo_codes),
         "pending_payments": len(pending_payments),
+        "banned_count": len(banned_users),
     }
 
 @app.get("/admin/logs")
