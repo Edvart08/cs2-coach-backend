@@ -920,7 +920,10 @@ async def activate_key(req: KeyReq):
 @app.get("/pro/{steamid}")
 async def pro_status(steamid: str):
     usage = check_usage(steamid)
-    return {"pro": usage["pro"], "remaining": usage["remaining"], "limit": FREE_LIMIT}
+    result = {"pro": usage["pro"], "remaining": usage["remaining"], "limit": FREE_LIMIT}
+    if usage["pro"] and steamid in pro_users:
+        result["data"] = pro_users[steamid]
+    return result
 
 @app.post("/pro/restore")
 async def pro_restore(request: Request):
