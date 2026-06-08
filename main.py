@@ -1050,15 +1050,22 @@ async def admin_get_logs(token: str = ""):
 async def admin_users(token: str = "", limit: int = 100):
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="Forbidden")
-    
+
+    # Мёржим pro_users из памяти + из файла (Render мог перезапуститься)
+    file_pro = _load("pro_users", {})
+    merged_pro = {**file_pro, **pro_users}  # memory wins over file
+
+    def _is_pro(sid):
+        return sid in merged_pro
+
     # Собираем всех пользователей из всех источников
     all_steamids = set()
     all_steamids.update(user_visits.keys())
     all_steamids.update(analysis_history.keys())
     all_steamids.update(e.get("steamid","") for e in leaderboard if e.get("steamid"))
-    all_steamids.update(pro_users.keys())
+    all_steamids.update(merged_pro.keys())
     all_steamids.discard("")
-    
+
     users = []
     for steamid in all_steamids:
         visit = user_visits.get(steamid, {})
@@ -1068,6 +1075,7 @@ async def admin_users(token: str = "", limit: int = 100):
             visit.get("last_seen", 0),
             hist[0].get("timestamp", 0) if hist else 0
         )
+        pro_data = merged_pro.get(steamid, {})
         users.append({
             "steamid": steamid,
             "username": visit.get("username") or lb_entry.get("username",""),
@@ -1078,14 +1086,16 @@ async def admin_users(token: str = "", limit: int = 100):
             "last_seen": last_ts,
             "visit_count": visit.get("visit_count", 0),
             "analyses": len(hist),
-            "is_pro": is_pro(steamid),
+            "is_pro": _is_pro(steamid),
+            "pro_plan": pro_data.get("plan",""),
+            "pro_activated_at": pro_data.get("activated_at",0),
             "is_banned": steamid in banned_users,
             "ban_reason": banned_users.get(steamid,{}).get("reason",""),
             "kd": lb_entry.get("stats",{}).get("kd",""),
             "matches": lb_entry.get("stats",{}).get("matches",""),
             "faceit_level": lb_entry.get("level",""),
         })
-    
+
     users.sort(key=lambda x: x["last_seen"], reverse=True)
     return {"users": users[:limit], "total": len(users)}
 
