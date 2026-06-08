@@ -1235,15 +1235,24 @@ async def support_msg(req: SupportReq):
     support_sessions[sid]["msgs"].append({"from":"user","text":req.message,"ts":ts})
 
     # Собираем полную инфу об игроке
+    # Если про_users пустой (рестарт Render) — пробуем загрузить из /tmp
     pro_info = pro_users.get(sid)
+    if not pro_info:
+        try:
+            saved = _load("pro_users", {})
+            if saved.get(sid):
+                pro_info = saved[sid]
+                pro_users[sid] = pro_info  # восстанавливаем в память
+        except: pass
+
     visit_info = user_visits.get(sid, {})
 
-    pro_status = "❌ Нет PRO"
+    pro_status = "❌ Нет PRO (или Render перезапустился — данные могли слететь)"
     if pro_info:
         activated = pro_info.get("activated_at", 0)
         plan = pro_info.get("plan","?")
         order = pro_info.get("order","?")
-        days_ago = max(0, (ts - activated) // 86400) if activated else "?"
+        days_ago = max(0, (ts - activated) // 86400) if activated else 0
         plan_days = 365 if plan == "year" else 30 if plan == "month" else 0
         days_left = max(0, plan_days - days_ago) if plan_days else "∞"
         activated_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(activated)) if activated else "?"
@@ -1264,7 +1273,6 @@ async def support_msg(req: SupportReq):
         first_str = time.strftime("%d.%m.%Y", time.localtime(first_seen)) if first_seen else "?"
         visit_str = f"\n👁 Визитов: {visit_count} · Первый: {first_str} · Последний: {last_str}"
 
-    # История оплат из analysis_history
     hist = analysis_history.get(sid, [])
     hist_str = f"\n🎮 Анализов запрошено: {len(hist)}" if hist else ""
 
@@ -1286,6 +1294,8 @@ async def support_msg(req: SupportReq):
     ],[
         {"text":"📊 Профиль игрока","callback_data":f"profile:{sid}"},
         {"text":"⚡ Выдать PRO","callback_data":f"grant:{sid}"},
+    ],[
+        {"text":"✅ Закрыть вопрос","callback_data":f"close:{sid}"},
     ]]}
     await _tg_send_bg(text, markup=markup)
     return {"ok": True}
@@ -1400,6 +1410,21 @@ async def tg_webhook(request: Request):
                 {"text":"🚫 Забанить","callback_data":f"ban:{target_sid}"},
             ]]}
             await tg_send(profile_text, chat_id=cid, markup=markup)
+
+        elif cbd.startswith("close:"):
+            target_sid = cbd[6:]
+            uname = user_visits.get(target_sid, {}).get("username", target_sid) or support_sessions.get(target_sid, {}).get("username","?")
+            # Отправляем пользователю финальное сообщение
+            if target_sid in support_sessions:
+                close_ts = int(time.time())
+                support_sessions[target_sid]["msgs"].append({
+                    "from":"admin",
+                    "text":"✅ Вопрос закрыт. Если появятся новые вопросы — пиши, всегда помогу!\n\nОцени поддержку: хорошо / плохо",
+                    "ts": close_ts,
+                    "close_session": True  # маркер для фронтенда
+                })
+            log_admin("Вопрос закрыт", f"steamid={target_sid} by_admin={cid}")
+            await tg_send(f"✅ Вопрос <b>{uname}</b> закрыт.", chat_id=cid)
 
         elif cbd.startswith("ban:"):
             target_sid = cbd[4:]
