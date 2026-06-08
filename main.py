@@ -651,11 +651,14 @@ async def weekly_report(req: WeeklyReportReq):
         return {"result": json.loads(r.json()["choices"][0]["message"]["content"])}
     except:
         return {"error":"parse_error"}
-    kd: str; winrate: str; hs: str; matches: str; rank: str
-    faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
-    maps: Optional[list] = []
-    recent_matches: Optional[list] = []
+
+class SummaryReq(BaseModel):
+    kd: str = "0"; winrate: str = "0"; hs: str = "0"; matches: str = "0"
+    rank: str = ""; faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
+    adr: Optional[str] = ""; clutch1v1: Optional[str] = ""; entrySuccess: Optional[str] = ""
+    maps: Optional[list] = []; recent_matches: Optional[list] = []
     best_map: Optional[str] = ""; worst_map: Optional[str] = ""
+    extra: Optional[dict] = {}  # Steam: kills, deaths, mvps, sniper_kills, knife_kills, playtime
 
 @app.post("/ai-summary")
 async def ai_summary(req: SummaryReq):
@@ -663,45 +666,76 @@ async def ai_summary(req: SummaryReq):
     maps_text = ""
     if req.maps:
         sorted_maps = sorted(req.maps, key=lambda m: float(m.get("winrate",0)), reverse=True)
-        rows = [f"{m.get('map')}: {m.get('winrate')}% WR, {m.get('kd')} K/D, {m.get('matches')} матчей" for m in sorted_maps[:6]]
-        maps_text = "\nСтатистика по картам:\n" + "\n".join(rows)
+        rows = [f"  {m.get('map')}: {m.get('winrate')}% WR, K/D={m.get('kd')}, {m.get('matches')} матчей" for m in sorted_maps[:8]]
+        maps_text = "\nСТАТИСТИКА КАРТ:\n" + "\n".join(rows)
         if sorted_maps:
-            maps_text += f"\nЛУЧШАЯ карта: {sorted_maps[0].get('map')} ({sorted_maps[0].get('winrate')}% WR)"
-            maps_text += f"\nХУДШАЯ карта: {sorted_maps[-1].get('map')} ({sorted_maps[-1].get('winrate')}% WR)"
+            maps_text += f"\n→ ЛУЧШАЯ: {sorted_maps[0].get('map')} ({sorted_maps[0].get('winrate')}% WR)"
+            maps_text += f"\n→ ХУДШАЯ: {sorted_maps[-1].get('map')} ({sorted_maps[-1].get('winrate')}% WR)"
 
     # Последние матчи
     recent_text = ""
     if req.recent_matches:
+        wins = sum(1 for m in req.recent_matches if m.get("result")=="1")
         recent_rows = []
         for m in req.recent_matches[:5]:
-            res = "Победа" if m.get("result") == "1" else "Поражение"
-            recent_rows.append(f"{m.get('map','?')}: {res}, K/D {m.get('kd','?')}, HS {m.get('hs','?')}%, ADR {m.get('adr','?')}")
-        recent_text = "\nПоследние матчи:\n" + "\n".join(recent_rows)
+            res = "W" if m.get("result")=="1" else "L"
+            recent_rows.append(f"  {res} {m.get('map','?')}: K/D={m.get('kd','?')}, HS={m.get('hs','?')}%, ADR={m.get('adr','?')}")
+        recent_text = f"\nПОСЛЕДНИЕ {len(req.recent_matches)} МАТЧЕЙ ({wins}W/{len(req.recent_matches)-wins}L):\n" + "\n".join(recent_rows)
 
-    prompt = f"""Ты личный CS2 тренер. Игрок только что открыл свой профиль.
-Напиши им КОНКРЕТНЫЙ разбор — упомяни реальные карты, реальные цифры из их статистики.
-Не пиши общие советы — только то что видишь в данных.
+    # Дополнительные Steam данные
+    extra = {}
+    if hasattr(req, 'extra') and req.extra:
+        extra = req.extra or {}
+    steam_text = ""
+    if extra.get("kills"): steam_text += f"\nSteam: {extra['kills']} убийств, {extra.get('deaths','?')} смертей"
+    if extra.get("sniper_kills"): steam_text += f", снайпером={extra['sniper_kills']}"
+    if extra.get("knife_kills"): steam_text += f", ножом={extra['knife_kills']}"
+    if extra.get("mvps"): steam_text += f", MVP={extra['mvps']}"
+    if extra.get("playtime"): steam_text += f", {round(int(extra['playtime'])/60)}ч в игре"
 
-Данные: K/D={req.kd}, WR={req.winrate}%, HS%={req.hs}, Матчей={req.matches}, FACEIT lvl={req.faceit_level or "нет"}, ELO={req.faceit_elo or "нет"}{maps_text}{recent_text}
+    prompt = f"""Ты профессиональный CS2 тренер-аналитик. Проанализируй статистику игрока максимально детально.
+
+ДАННЫЕ ИГРОКА:
+K/D={req.kd} | WinRate={req.winrate}% | HS%={req.hs} | ADR={req.adr or '?'} | Матчей={req.matches}
+FACEIT: уровень={req.faceit_level or 'нет'}, ELO={req.faceit_elo or 'нет'}
+Clutch 1v1={req.clutch1v1 or '?'}% | Entry Success={req.entrySuccess or '?'}%{maps_text}{recent_text}{steam_text}
+
+ИНСТРУКЦИЯ:
+- Упоминай конкретные карты, конкретные цифры — никаких общих фраз
+- Сравнивай показатели с уровнем игрока (FACEIT lvl {req.faceit_level or 'без'} / {req.matches} матчей)
+- Тон: прямой, честный, мотивирующий — как реальный тренер
+- verdict: 3-4 предложения, обязательно упомяни карты и конкретные цифры
+- strengths: конкретно (напр. "HS% 42% — выше среднего для уровня, это значит хороший прицел")
+- problems: конкретно (напр. "WR 28% — катастрофически низкий, основная причина...")
+- priority: ОДНО конкретное действие которое даст максимум улучшения
+- weekly_plan: 3 конкретных задания на эту неделю с измеримым результатом
+- role_analysis: разбор роли в команде по статам
+- mental_note: честная психологическая оценка по цифрам
 
 Верни ТОЛЬКО JSON без markdown:
-{{"verdict":"2-3 предложения — конкретный вывод с упоминанием реальных карт и цифр из данных выше",
-"strengths":["конкретная сильная сторона с цифрой","конкретная сильная сторона с цифрой"],
-"problems":["конкретная проблема с цифрой или картой","конкретная проблема","конкретная проблема"],
-"priority":"одно конкретное действие прямо сейчас — с привязкой к слабой карте или стате",
-"role":"ENTRY / SUPPORT / RIFLER / LURKER / AWP — угадай по статам",
-"roast":"короткая честная фраза суровый тренер, без оскорблений но прямо — упомяни конкретную слабость",
-"best_map":{{"name":"название лучшей карты","wr":"WR% цифра","tip":"одна фраза — что делать на этой карте"}},
-"worst_map":{{"name":"название худшей карты","wr":"WR% цифра","tip":"убрать из пула или конкретный совет"}}
+{{"verdict":"3-4 предложения с конкретными цифрами и картами",
+"role":"ENTRY FRAGGER / SUPPORT / RIFLER / LURKER / AWPer — определи по HS%, ADR, картам",
+"role_analysis":"2 предложения — почему эта роль, что делать в ней лучше",
+"roast":"1 короткая честная фраза от строгого тренера — прямо, без обид но правда",
+"strengths":[{{"stat":"K/D","value":"{req.kd}","verdict":"оценка с сравнением","tip":"как использовать"}},{{"stat":"HS%","value":"{req.hs}%","verdict":"оценка","tip":"совет"}}],
+"problems":[{{"stat":"WR%","value":"{req.winrate}%","reason":"почему так","fix":"конкретное действие","priority":1}},{{"stat":"другой стат","value":"цифра","reason":"причина","fix":"действие","priority":2}},{{"stat":"ещё","value":"цифра","reason":"причина","fix":"действие","priority":3}}],
+"best_map":{{"name":"карта","wr":"{sorted_maps[0].get('winrate','?') if req.maps else '?'}%","kd":"?","tip":"что делать на ней"}},
+"worst_map":{{"name":"карта","wr":"?%","kd":"?","tip":"как исправить или убрать из пула"}},
+"priority":"ОДНО самое важное действие прямо сейчас — максимально конкретно",
+"weekly_plan":[{{"day":"Пн-Вт","task":"конкретное задание","goal":"измеримый результат"}},{{"day":"Ср-Чт","task":"задание","goal":"результат"}},{{"day":"Пт-Вс","task":"задание","goal":"результат"}}],
+"mental_note":"честная психологическая оценка — что мешает психологически по цифрам",
+"rating_breakdown":{{"aim":75,"game_sense":60,"consistency":55,"utility":40,"clutch":50}}
 }}"""
 
-    async with httpx.AsyncClient(timeout=25) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
-                "messages":[{"role":"system","content":"Ты тренер по CS2. Отвечай ТОЛЬКО валидным JSON без markdown. Всегда упоминай конкретные цифры и карты из данных."},
-                             {"role":"user","content":prompt}],
-                "temperature":0.75,
+                "messages":[
+                    {"role":"system","content":"Ты профессиональный CS2 тренер. ВСЕГДА упоминай конкретные цифры из данных. Отвечай ТОЛЬКО валидным JSON без markdown. Пиши на русском языке."},
+                    {"role":"user","content":prompt}],
+                "temperature":0.7,
+                "max_tokens":1500,
                 "response_format":{"type":"json_object"}})
     data = r.json()
     try:
