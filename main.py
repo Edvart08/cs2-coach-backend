@@ -502,7 +502,7 @@ level = одно из: Новичок, Средний, Хороший, Про"""
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
                 "messages":[
-                    {"role":"system","content":"Ты тренер CS2. Отвечай ТОЛЬКО валидным JSON-объектом без markdown и пояснений."},
+                    {"role":"system","content":"Ты CS2 тренер. Обращайся к игроку на 'ты' — 'твой K/D', 'тебе нужно', 'у тебя'. НИКОГДА не пиши 'игрок/игроку'. Отвечай ТОЛЬКО валидным JSON-объектом без markdown и пояснений."},
                     {"role":"user","content":prompt}],
                 "temperature":0.6,
                 "response_format":{"type":"json_object"}})
@@ -732,7 +732,7 @@ Clutch 1v1={req.clutch1v1 or '?'}% | Entry Success={req.entrySuccess or '?'}%{ma
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
                 "messages":[
-                    {"role":"system","content":"Ты профессиональный CS2 тренер. ВСЕГДА упоминай конкретные цифры из данных. Отвечай ТОЛЬКО валидным JSON без markdown. Пиши на русском языке."},
+                    {"role":"system","content":"Ты профессиональный CS2 тренер который разговаривает ЛИЧНО с игроком. КРИТИЧЕСКИ ВАЖНО: обращайся к игроку на 'ты' — пиши 'твой K/D', 'тебе нужно', 'у тебя', 'ты делаешь'. НИКОГДА не пиши 'игрок', 'игроку', 'пользователь' — только 'ты/тебе/твой'. ВСЕГДА упоминай конкретные цифры из данных. Отвечай ТОЛЬКО валидным JSON без markdown. Пиши на русском языке."},
                     {"role":"user","content":prompt}],
                 "temperature":0.7,
                 "max_tokens":1500,
