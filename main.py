@@ -1296,6 +1296,14 @@ async def support_poll(steamid: str, since: int = 0):
     new_msgs = [m for m in sess["msgs"] if m["ts"] > since and m["from"]=="admin"]
     return {"messages": new_msgs}
 
+@app.get("/support/history/{steamid}")
+async def support_history(steamid: str):
+    """Возвращает историю чата поддержки для синхронизации между устройствами"""
+    sess = support_sessions.get(steamid, {"msgs":[]})
+    # Возвращаем только сообщения от обеих сторон (не системные)
+    msgs = [m for m in sess.get("msgs", []) if m.get("text")]
+    return {"messages": msgs, "username": sess.get("username","")}
+
 @app.post("/telegram/webhook")
 async def tg_webhook(request: Request):
     try: data = await request.json()
