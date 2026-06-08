@@ -922,6 +922,44 @@ async def pro_status(steamid: str):
     usage = check_usage(steamid)
     return {"pro": usage["pro"], "remaining": usage["remaining"], "limit": FREE_LIMIT}
 
+@app.post("/pro/restore")
+async def pro_restore(request: Request):
+    """Восстанавливает PRO из кеша фронтенда если бэкенд потерял данные после рестарта"""
+    try:
+        data = await request.json()
+        steamid = data.get("steamid","")
+        pro_data = data.get("pro_data", {})
+        if not steamid or not pro_data:
+            return {"ok": False, "reason": "no data"}
+        # Если уже есть PRO — ничего не делаем
+        if steamid in pro_users:
+            return {"ok": True, "already": True}
+        # Проверяем что данные выглядят валидно
+        activated_at = pro_data.get("activated_at", 0)
+        plan = pro_data.get("plan", "")
+        order = pro_data.get("order", "")
+        if not activated_at or not plan:
+            return {"ok": False, "reason": "invalid data"}
+        # Проверяем что подписка не истекла
+        days = 365 if plan=="year" else 30 if plan=="month" else 0
+        if days > 0:
+            expires = activated_at * 1000 + days * 86400 * 1000
+            import time as _t
+            if _t.time() * 1000 > expires:
+                return {"ok": False, "reason": "expired"}
+        # Восстанавливаем
+        pro_users[steamid] = {
+            "key": pro_data.get("key", f"RESTORED-{steamid[:8]}"),
+            "activated_at": activated_at,
+            "plan": plan,
+            "order": order or f"restored_{int(time.time())}"
+        }
+        _save("pro_users", pro_users)
+        log_admin("PRO восстановлен из кеша", f"steamid={steamid} plan={plan} order={order}")
+        return {"ok": True, "restored": True}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)}
+
 @app.post("/admin/keys/generate")
 async def generate_keys(request: Request, n: int = 1):
     token = request.headers.get("x-admin-token","")
@@ -1184,26 +1222,67 @@ async def support_msg(req: SupportReq):
     if sid not in support_sessions:
         support_sessions[sid] = {"username": req.username, "msgs": []}
 
-    # Дедупликация: не добавляем одинаковые сообщения в течение 10 секунд
+    # Дедупликация
     recent = support_sessions[sid]["msgs"]
     if recent:
         last = recent[-1]
         if last["from"] == "user" and last["text"] == req.message and (ts - last["ts"]) < 10:
-            return {"ok": True}  # дубль — игнорируем
+            return {"ok": True}
 
     support_sessions[sid]["msgs"].append({"from":"user","text":req.message,"ts":ts})
 
-    # Уведомляем админа с кнопкой "Ответить"
+    # Собираем полную инфу об игроке
+    pro_info = pro_users.get(sid)
+    visit_info = user_visits.get(sid, {})
+
+    pro_status = "❌ Нет PRO"
+    if pro_info:
+        activated = pro_info.get("activated_at", 0)
+        plan = pro_info.get("plan","?")
+        order = pro_info.get("order","?")
+        days_ago = max(0, (ts - activated) // 86400) if activated else "?"
+        plan_days = 365 if plan == "year" else 30 if plan == "month" else 0
+        days_left = max(0, plan_days - days_ago) if plan_days else "∞"
+        activated_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(activated)) if activated else "?"
+        pro_status = (
+            f"✅ PRO активен\n"
+            f"   📋 План: {plan}\n"
+            f"   📅 Активирован: {activated_str}\n"
+            f"   ⏳ Осталось: {days_left} дн.\n"
+            f"   🧾 Заказ: {order}"
+        )
+
+    visit_str = ""
+    if visit_info:
+        last_seen = visit_info.get("last_seen", 0)
+        first_seen = visit_info.get("first_seen", 0)
+        visit_count = visit_info.get("visit_count", 0)
+        last_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(last_seen)) if last_seen else "?"
+        first_str = time.strftime("%d.%m.%Y", time.localtime(first_seen)) if first_seen else "?"
+        visit_str = f"\n👁 Визитов: {visit_count} · Первый: {first_str} · Последний: {last_str}"
+
+    # История оплат из analysis_history
+    hist = analysis_history.get(sid, [])
+    hist_str = f"\n🎮 Анализов запрошено: {len(hist)}" if hist else ""
+
     users_count = len(support_sessions)
     text = (
-        f"\U0001f4ac <b>Поддержка \u00b7 {req.username}</b>\n"
-        f"Steam: <code>{sid}</code>\n\n"
-        f"{req.message}\n\n"
+        f"💬 <b>Поддержка · {req.username}</b>\n"
+        f"Steam: <code>{sid}</code>\n"
+        f"{'🔗 https://steamcommunity.com/profiles/'+sid if sid!='anon' else ''}\n\n"
+        f"📩 <b>Сообщение:</b>\n{req.message}\n\n"
+        f"─────────────────\n"
+        f"<b>Статус игрока:</b>\n{pro_status}"
+        f"{visit_str}"
+        f"{hist_str}\n\n"
         f"<i>Активных диалогов: {users_count}</i>"
     )
     markup = {"inline_keyboard":[[
-        {"text":f"\u270f\ufe0f Ответить {req.username}","callback_data":f"reply:{sid}"},
-        {"text":"\U0001f465 Все диалоги","callback_data":"list_users"},
+        {"text":f"✏️ Ответить {req.username}","callback_data":f"reply:{sid}"},
+        {"text":"👥 Все диалоги","callback_data":"list_users"},
+    ],[
+        {"text":"📊 Профиль игрока","callback_data":f"profile:{sid}"},
+        {"text":"⚡ Выдать PRO","callback_data":f"grant:{sid}"},
     ]]}
     await _tg_send_bg(text, markup=markup)
     return {"ok": True}
@@ -1261,9 +1340,67 @@ async def tg_webhook(request: Request):
                 rows = []
                 for sid, sess in list(support_sessions.items())[-10:]:
                     last = sess["msgs"][-1]["text"][:40] if sess["msgs"] else "—"
-                    rows.append([{"text":f"👤 {sess['username']}: {last}","callback_data":f"reply:{sid}"}])
+                    pro_mark = "⚡" if sid in pro_users else ""
+                    rows.append([{"text":f"{pro_mark}👤 {sess['username']}: {last}","callback_data":f"reply:{sid}"}])
                 await tg_send("👥 <b>Активные диалоги:</b>", chat_id=cid,
                     markup={"inline_keyboard":rows})
+
+        elif cbd.startswith("grant:"):
+            target_sid = cbd[6:]
+            if target_sid in pro_users:
+                uname = user_visits.get(target_sid, {}).get("username", target_sid)
+                await tg_send(f"ℹ️ У {uname} уже есть PRO\n<code>{target_sid}</code>", chat_id=cid)
+            else:
+                activate_pro(target_sid, "manual", f"tg_grant_{int(time.time())}")
+                uname = user_visits.get(target_sid, {}).get("username", target_sid)
+                log_admin("PRO выдан через TG", f"steamid={target_sid} by_admin={cid}")
+                await tg_send(
+                    f"✅ PRO выдан игроку <b>{uname}</b>\n<code>{target_sid}</code>\n"
+                    f"Plan: manual · Выдан вручную из поддержки", chat_id=cid)
+
+        elif cbd.startswith("profile:"):
+            target_sid = cbd[8:]
+            pro_info = pro_users.get(target_sid)
+            visit_info = user_visits.get(target_sid, {})
+            uname = visit_info.get("username", target_sid)
+            avatar = visit_info.get("avatar","")
+            visits = visit_info.get("visit_count", 0)
+            first = time.strftime("%d.%m.%Y", time.localtime(visit_info.get("first_seen",0))) if visit_info.get("first_seen") else "?"
+            last  = time.strftime("%d.%m.%Y %H:%M", time.localtime(visit_info.get("last_seen",0))) if visit_info.get("last_seen") else "?"
+            analyses = len(analysis_history.get(target_sid, []))
+            pro_str = "❌ Нет PRO"
+            if pro_info:
+                plan = pro_info.get("plan","?")
+                activated = pro_info.get("activated_at",0)
+                order = pro_info.get("order","?")
+                activated_str = time.strftime("%d.%m.%Y", time.localtime(activated)) if activated else "?"
+                pro_str = f"✅ PRO · {plan} · с {activated_str} · заказ {order}"
+            profile_text = (
+                f"👤 <b>{uname}</b>\n"
+                f"<code>{target_sid}</code>\n"
+                f"🔗 steamcommunity.com/profiles/{target_sid}\n\n"
+                f"📊 PRO: {pro_str}\n"
+                f"👁 Визитов: {visits} · Первый: {first} · Последний: {last}\n"
+                f"🤖 AI анализов: {analyses}\n"
+                f"🚫 Забанен: {'да' if target_sid in banned_users else 'нет'}"
+            )
+            markup = {"inline_keyboard":[[
+                {"text":"⚡ Выдать PRO","callback_data":f"grant:{target_sid}"},
+                {"text":"🚫 Забанить","callback_data":f"ban:{target_sid}"},
+            ]]}
+            await tg_send(profile_text, chat_id=cid, markup=markup)
+
+        elif cbd.startswith("ban:"):
+            target_sid = cbd[4:]
+            if target_sid not in banned_users:
+                banned_users[target_sid] = {"reason":"Support ban", "banned_at":int(time.time())}
+                _save("banned_users", banned_users)
+                uname = user_visits.get(target_sid, {}).get("username", target_sid)
+                log_admin("Бан через TG", f"steamid={target_sid}")
+                await tg_send(f"🚫 Игрок <b>{uname}</b> забанен\n<code>{target_sid}</code>", chat_id=cid)
+            else:
+                await tg_send(f"ℹ️ Уже забанен", chat_id=cid)
+
         return {"ok":True}
 
     # Текстовые сообщения от админа
@@ -1479,6 +1616,7 @@ def decode_sharing_code(code: str) -> dict:
         return {"matchid": "", "reservationid": "", "tvport": 0, "error": str(e)}
 
 
+@app.get("/admin/backup")
 def admin_backup(token: str = ""):
     """Отдаёт все данные одним JSON — для GitHub Action backup"""
     if token != ADMIN_TOKEN:
