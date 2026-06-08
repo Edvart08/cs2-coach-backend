@@ -925,44 +925,6 @@ async def pro_status(steamid: str):
         result["data"] = pro_users[steamid]
     return result
 
-@app.post("/pro/restore")
-async def pro_restore(request: Request):
-    """Восстанавливает PRO из кеша фронтенда если бэкенд потерял данные после рестарта"""
-    try:
-        data = await request.json()
-        steamid = data.get("steamid","")
-        pro_data = data.get("pro_data", {})
-        if not steamid or not pro_data:
-            return {"ok": False, "reason": "no data"}
-        # Если уже есть PRO — ничего не делаем
-        if steamid in pro_users:
-            return {"ok": True, "already": True}
-        # Проверяем что данные выглядят валидно
-        activated_at = pro_data.get("activated_at", 0)
-        plan = pro_data.get("plan", "")
-        order = pro_data.get("order", "")
-        if not activated_at or not plan:
-            return {"ok": False, "reason": "invalid data"}
-        # Проверяем что подписка не истекла
-        days = 365 if plan=="year" else 30 if plan=="month" else 0
-        if days > 0:
-            expires = activated_at * 1000 + days * 86400 * 1000
-            import time as _t
-            if _t.time() * 1000 > expires:
-                return {"ok": False, "reason": "expired"}
-        # Восстанавливаем
-        pro_users[steamid] = {
-            "key": pro_data.get("key", f"RESTORED-{steamid[:8]}"),
-            "activated_at": activated_at,
-            "plan": plan,
-            "order": order or f"restored_{int(time.time())}"
-        }
-        _save("pro_users", pro_users)
-        log_admin("PRO восстановлен из кеша", f"steamid={steamid} plan={plan} order={order}")
-        return {"ok": True, "restored": True}
-    except Exception as e:
-        return {"ok": False, "reason": str(e)}
-
 @app.post("/admin/keys/generate")
 async def generate_keys(request: Request, n: int = 1):
     token = request.headers.get("x-admin-token","")
@@ -1378,16 +1340,60 @@ async def tg_webhook(request: Request):
 
         elif cbd.startswith("grant:"):
             target_sid = cbd[6:]
+            uname = user_visits.get(target_sid, {}).get("username", target_sid)
             if target_sid in pro_users:
-                uname = user_visits.get(target_sid, {}).get("username", target_sid)
-                await tg_send(f"ℹ️ У {uname} уже есть PRO\n<code>{target_sid}</code>", chat_id=cid)
-            else:
-                activate_pro(target_sid, "manual", f"tg_grant_{int(time.time())}")
-                uname = user_visits.get(target_sid, {}).get("username", target_sid)
-                log_admin("PRO выдан через TG", f"steamid={target_sid} by_admin={cid}")
                 await tg_send(
-                    f"✅ PRO выдан игроку <b>{uname}</b>\n<code>{target_sid}</code>\n"
-                    f"Plan: manual · Выдан вручную из поддержки", chat_id=cid)
+                    f"ℹ️ У <b>{uname}</b> уже есть PRO\n<code>{target_sid}</code>\n"
+                    f"Выбери действие:",
+                    chat_id=cid,
+                    markup={"inline_keyboard":[[
+                        {"text":"♻️ Продлить на месяц","callback_data":f"grant_plan:{target_sid}:month"},
+                        {"text":"♻️ Продлить на год","callback_data":f"grant_plan:{target_sid}:year"},
+                    ],[
+                        {"text":"∞ Навсегда","callback_data":f"grant_plan:{target_sid}:lifetime"},
+                        {"text":"❌ Отозвать PRO","callback_data":f"revoke:{target_sid}"},
+                    ]]}
+                )
+            else:
+                # Показываем выбор плана
+                await tg_send(
+                    f"⚡ Выдать PRO игроку <b>{uname}</b>\n<code>{target_sid}</code>\n\nВыбери план:",
+                    chat_id=cid,
+                    markup={"inline_keyboard":[[
+                        {"text":"📅 1 месяц","callback_data":f"grant_plan:{target_sid}:month"},
+                        {"text":"📆 1 год","callback_data":f"grant_plan:{target_sid}:year"},
+                    ],[
+                        {"text":"∞ Навсегда","callback_data":f"grant_plan:{target_sid}:lifetime"},
+                        {"text":"❌ Отмена","callback_data":f"profile:{target_sid}"},
+                    ]]}
+                )
+
+        elif cbd.startswith("grant_plan:"):
+            parts = cbd.split(":")
+            if len(parts) >= 3:
+                target_sid = parts[1]
+                plan = parts[2]
+                uname = user_visits.get(target_sid, {}).get("username", target_sid)
+                plan_labels = {"month":"1 месяц","year":"1 год","lifetime":"Навсегда"}
+                activate_pro(target_sid, plan, f"tg_grant_{int(time.time())}")
+                log_admin("PRO выдан через TG", f"steamid={target_sid} plan={plan} by_admin={cid}")
+                await tg_send(
+                    f"✅ PRO выдан игроку <b>{uname}</b>\n"
+                    f"<code>{target_sid}</code>\n"
+                    f"📋 План: {plan_labels.get(plan, plan)}",
+                    chat_id=cid
+                )
+
+        elif cbd.startswith("revoke:"):
+            target_sid = cbd[7:]
+            uname = user_visits.get(target_sid, {}).get("username", target_sid)
+            if target_sid in pro_users:
+                del pro_users[target_sid]
+                _save("pro_users", pro_users)
+                log_admin("PRO отозван через TG", f"steamid={target_sid} by_admin={cid}")
+                await tg_send(f"✅ PRO отозван у <b>{uname}</b>\n<code>{target_sid}</code>", chat_id=cid)
+            else:
+                await tg_send(f"ℹ️ У {uname} нет PRO", chat_id=cid)
 
         elif cbd.startswith("profile:"):
             target_sid = cbd[8:]
