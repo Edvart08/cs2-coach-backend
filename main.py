@@ -872,7 +872,6 @@ async def payment_webhook(request: Request):
     event = data.get("event", "")
     obj   = data.get("object", {})
 
-    # Нас интересует только успешный платёж
     if event != "payment.succeeded":
         return HTMLResponse("OK")
 
@@ -882,23 +881,74 @@ async def payment_webhook(request: Request):
     plan       = metadata.get("plan", "month")
     order_id   = metadata.get("order_id", "")
 
-    # Проверяем что платёж реально succeeded
     if obj.get("status") != "succeeded":
         return HTMLResponse("OK")
 
     if steamid and order_id:
         activate_pro(steamid, plan, order_id)
-        # Чистим pending
         pending_payments.pop(order_id, None)
         pending_payments.pop(payment_id, None)
         amount = obj.get("amount", {}).get("value", "?")
-        await _tg_send_bg(f"💰 Оплата получена!\nSteam: {steamid}\nПлан: {plan}\nСумма: {amount} руб\nOrder: {order_id}")
+        uname = user_visits.get(steamid, {}).get("username", steamid)
+        plan_labels = {"month":"1 месяц (30 дн.)","year":"1 год (365 дн.)","lifetime":"Навсегда"}
+        # Подробное уведомление в TG
+        text = (
+            f"💰 <b>Оплата получена!</b>\n"
+            f"👤 <b>{uname}</b>\n"
+            f"Steam: <code>{steamid}</code>\n\n"
+            f"📋 План: {plan_labels.get(plan, plan)}\n"
+            f"💵 Сумма: {amount} руб\n"
+            f"🧾 Order ID: <code>{order_id}</code>\n"
+            f"🆔 Payment ID: <code>{payment_id}</code>\n\n"
+            f"🔗 <a href='https://yookassa.ru/my/payments/{payment_id}'>Открыть в ЮКассе</a>"
+        )
+        markup = {"inline_keyboard":[[
+            {"text":f"👤 Профиль {uname}","callback_data":f"profile:{steamid}"},
+        ]]}
+        await _tg_send_bg(text, markup=markup)
 
     return HTMLResponse("OK")
 
 @app.get("/payment/status/{steamid}")
 async def payment_status(steamid: str):
     return {"pro": is_pro(steamid), "data": pro_users.get(steamid)}
+
+@app.get("/admin/payment/verify/{order_or_payment_id}")
+async def verify_payment(order_or_payment_id: str, token: str = ""):
+    """Проверяет статус платежа напрямую в ЮКассе"""
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not YOO_SECRET or not YOO_SHOP_ID:
+        return {"error": "ЮКасса не настроена"}
+    try:
+        import base64
+        creds = base64.b64encode(f"{YOO_SHOP_ID}:{YOO_SECRET}".encode()).decode()
+        async with httpx.AsyncClient(timeout=10) as c:
+            # Сначала пробуем как payment_id
+            r = await c.get(
+                f"https://api.yookassa.ru/v3/payments/{order_or_payment_id}",
+                headers={"Authorization": f"Basic {creds}"}
+            )
+            if r.status_code == 200:
+                d = r.json()
+                meta = d.get("metadata", {})
+                amount = d.get("amount", {})
+                return {
+                    "found": True,
+                    "payment_id": d.get("id"),
+                    "status": d.get("status"),
+                    "paid": d.get("paid", False),
+                    "amount": f"{amount.get('value','?')} {amount.get('currency','RUB')}",
+                    "steamid": meta.get("steamid",""),
+                    "plan": meta.get("plan",""),
+                    "order_id": meta.get("order_id",""),
+                    "created_at": d.get("created_at",""),
+                    "description": d.get("description",""),
+                    "yookassa_link": f"https://yookassa.ru/my/payments/{d.get('id','')}",
+                }
+            return {"found": False, "status_code": r.status_code, "detail": r.text[:200]}
+    except Exception as e:
+        return {"error": str(e)}
 
 # ── Pro эндпоинты ─────────────────────────────────────────────────────────────
 class KeyReq(BaseModel):
@@ -1473,6 +1523,143 @@ async def tg_webhook(request: Request):
         if text == "/stop":
             admin_active.pop(cid, None)
             await tg_send("❌ Вышел из режима ответа", chat_id=cid)
+            return {"ok":True}
+
+        if text == "/help":
+            await tg_send(
+                "📋 <b>Команды бота:</b>\n\n"
+                "/users — список диалогов поддержки\n"
+                "/stop — выйти из режима ответа\n"
+                "/pro <code>steamid</code> — проверить PRO статус игрока\n"
+                "/check <code>payment_id</code> — проверить платёж в ЮКассе\n"
+                "/stats — статистика сервера\n\n"
+                "<b>Кнопки на сообщениях:</b>\n"
+                "✏️ Ответить — ответить пользователю\n"
+                "⚡ Выдать PRO — выбрать план и выдать\n"
+                "📊 Профиль — полная инфа об игроке\n"
+                "✅ Закрыть вопрос — закрыть диалог",
+                chat_id=cid
+            )
+            return {"ok":True}
+
+        if text == "/stats":
+            pro_count = len(pro_users) or len(_load("pro_users", {}))
+            await tg_send(
+                f"📊 <b>Статистика:</b>\n"
+                f"👥 Игроков в базе: {len(user_visits)}\n"
+                f"⚡ PRO пользователей: {pro_count}\n"
+                f"💬 Активных диалогов: {len(support_sessions)}\n"
+                f"🎮 Лидерборд: {len(leaderboard)} игроков",
+                chat_id=cid
+            )
+            return {"ok":True}
+
+        if text.startswith("/pro "):
+            target_sid = text[5:].strip()
+            # Ищем по steamid или username
+            if not target_sid.startswith("7656"):
+                # Поиск по имени
+                found = [(sid, v) for sid, v in user_visits.items()
+                         if target_sid.lower() in v.get("username","").lower()]
+                if found:
+                    target_sid = found[0][0]
+                else:
+                    await tg_send(f"❌ Игрок '{target_sid}' не найден", chat_id=cid)
+                    return {"ok":True}
+
+            file_pro = _load("pro_users", {})
+            merged = {**file_pro, **pro_users}
+            pro_info = merged.get(target_sid)
+            uname = user_visits.get(target_sid, {}).get("username", target_sid)
+
+            if not pro_info:
+                await tg_send(
+                    f"❌ <b>{uname}</b> — PRO не найден\n<code>{target_sid}</code>",
+                    chat_id=cid,
+                    markup={"inline_keyboard":[[{"text":"⚡ Выдать PRO","callback_data":f"grant:{target_sid}"}]]}
+                )
+            else:
+                activated = pro_info.get("activated_at", 0)
+                plan = pro_info.get("plan","?")
+                order = pro_info.get("order","?")
+                activated_str = time.strftime("%d.%m.%Y %H:%M", time.localtime(activated)) if activated else "?"
+                plan_days = 365 if plan=="year" else 30 if plan=="month" else 0
+                days_ago = max(0,(int(time.time())-activated)//86400) if activated else 0
+                days_left = max(0,plan_days-days_ago) if plan_days else "∞"
+
+                expiry_str = ""
+                if plan_days > 0 and activated:
+                    expires_ts = activated + plan_days * 86400
+                    expires_str = time.strftime("%d.%m.%Y", time.localtime(expires_ts))
+                    if int(time.time()) > expires_ts:
+                        expiry_str = f"\n⚠️ <b>ИСТЕКЛА</b> {expires_str}"
+                    else:
+                        expiry_str = f"\n📅 Действует до: {expires_str} (осталось {days_left} дн.)"
+                elif plan == "lifetime":
+                    expiry_str = "\n∞ Навсегда"
+
+                await tg_send(
+                    f"✅ <b>{uname}</b> — PRO активен\n"
+                    f"<code>{target_sid}</code>\n\n"
+                    f"📋 План: {plan}\n"
+                    f"📅 Активирован: {activated_str}\n"
+                    f"🧾 Заказ: {order}"
+                    f"{expiry_str}",
+                    chat_id=cid,
+                    markup={"inline_keyboard":[[
+                        {"text":"❌ Отозвать","callback_data":f"revoke:{target_sid}"},
+                        {"text":"📊 Профиль","callback_data":f"profile:{target_sid}"},
+                    ]]}
+                )
+            return {"ok":True}
+
+        if text.startswith("/check "):
+            payment_id = text[7:].strip()
+            if not YOO_SECRET:
+                await tg_send("❌ ЮКасса не настроена (нет YOOKASSA_SECRET)", chat_id=cid)
+                return {"ok":True}
+            try:
+                import base64
+                creds = base64.b64encode(f"{YOO_SHOP_ID}:{YOO_SECRET}".encode()).decode()
+                async with httpx.AsyncClient(timeout=10) as c:
+                    r = await c.get(
+                        f"https://api.yookassa.ru/v3/payments/{payment_id}",
+                        headers={"Authorization": f"Basic {creds}"}
+                    )
+                if r.status_code == 200:
+                    d = r.json()
+                    meta = d.get("metadata", {})
+                    amount = d.get("amount", {})
+                    status = d.get("status","?")
+                    paid = d.get("paid", False)
+                    steamid_from_payment = meta.get("steamid","?")
+                    plan_from_payment = meta.get("plan","?")
+                    order_id_from_payment = meta.get("order_id","?")
+                    created = d.get("created_at","?")[:10] if d.get("created_at") else "?"
+                    uname = user_visits.get(steamid_from_payment, {}).get("username", steamid_from_payment)
+                    # Проверяем есть ли PRO у этого игрока
+                    has_pro = is_pro(steamid_from_payment) or steamid_from_payment in _load("pro_users",{})
+
+                    result = (
+                        f"🔍 <b>Платёж ЮКасса</b>\n"
+                        f"ID: <code>{payment_id}</code>\n\n"
+                        f"{'✅' if paid else '❌'} Статус: <b>{status}</b> {'(оплачен)' if paid else '(не оплачен)'}\n"
+                        f"💵 Сумма: {amount.get('value','?')} {amount.get('currency','RUB')}\n"
+                        f"📅 Создан: {created}\n\n"
+                        f"👤 Игрок: <b>{uname}</b>\n"
+                        f"Steam: <code>{steamid_from_payment}</code>\n"
+                        f"📋 План: {plan_from_payment}\n"
+                        f"🧾 Order: {order_id_from_payment}\n\n"
+                        f"PRO на сайте: {'✅ активен' if has_pro else '❌ не активен'}"
+                    )
+                    markup_rows = []
+                    if paid and not has_pro:
+                        markup_rows.append([{"text":f"⚡ Выдать PRO ({plan_from_payment})","callback_data":f"grant_plan:{steamid_from_payment}:{plan_from_payment}"}])
+                    await tg_send(result, chat_id=cid, markup={"inline_keyboard":markup_rows} if markup_rows else None)
+                else:
+                    await tg_send(f"❌ Платёж не найден (код {r.status_code})\n\nПроверь ID — он должен быть из ЮКассы, формат: <code>2a000...</code>", chat_id=cid)
+            except Exception as e:
+                await tg_send(f"❌ Ошибка: {e}", chat_id=cid)
             return {"ok":True}
 
         # Отправляем ответ пользователю
