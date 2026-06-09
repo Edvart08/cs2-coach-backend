@@ -652,7 +652,63 @@ async def weekly_report(req: WeeklyReportReq):
     except:
         return {"error":"parse_error"}
 
-class SummaryReq(BaseModel):
+@app.post("/coach-chat")
+async def coach_chat(request: Request):
+    """AI чат с персонажем тренера"""
+    try:
+        data = await request.json()
+        char_id = data.get("char_id", "mentor")
+        system = data.get("system", "Ты CS2 тренер. Говори на 'ты'. Отвечай кратко.")
+        stats = data.get("stats", "")
+        messages = data.get("messages", [])
+        steamid = data.get("steamid", "")
+
+        # Проверяем лимит для бесплатных персонажей
+        # Бесплатные: drill, mentor. Про: friend, analyst, legend
+        pro_chars = {"friend", "analyst", "legend"}
+        if char_id in pro_chars:
+            usage = check_usage(steamid)
+            if not usage["pro"]:
+                return {"reply": "🔒 Этот тренер доступен только с PRO. Получи PRO для доступа ко всем персонажам."}
+
+        # Проверяем общий лимит использования
+        if steamid and not check_usage(steamid)["pro"]:
+            # Бесплатный лимит чата — 10 сообщений в день
+            day_key = f"coach_chat_{steamid}_{time.strftime('%Y-%m-%d')}"
+            chat_count = int(_load(day_key, 0) or 0)
+            if chat_count >= 10:
+                return {"reply": "Дневной лимит чата исчерпан (10 сообщений). С PRO — безлимитно."}
+            _save(day_key, chat_count + 1)
+
+        # Строим контекст
+        full_system = f"""{system}
+
+Статистика игрока: {stats}
+
+Важно: отвечай кратко (2-4 предложения). Говори только на 'ты'. Давай конкретный совет."""
+
+        groq_messages = [{"role":"system","content":full_system}]
+        # Добавляем историю (последние 8 сообщений)
+        for msg in messages[-8:]:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if content:
+                groq_messages.append({"role":role,"content":content})
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.post("https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
+                json={"model":"llama-3.3-70b-versatile",
+                    "messages":groq_messages,
+                    "temperature":0.8,
+                    "max_tokens":300})
+
+        reply = r.json()["choices"][0]["message"]["content"]
+        return {"reply": reply}
+    except Exception as e:
+        return {"reply": f"Ошибка: {str(e)[:50]}"}
+
+
     kd: str = "0"; winrate: str = "0"; hs: str = "0"; matches: str = "0"
     rank: str = ""; faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
     adr: Optional[str] = ""; clutch1v1: Optional[str] = ""; entrySuccess: Optional[str] = ""
