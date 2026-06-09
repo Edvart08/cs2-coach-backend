@@ -709,6 +709,7 @@ async def coach_chat(request: Request):
         return {"reply": f"Ошибка: {str(e)[:50]}"}
 
 
+class SummaryReq(BaseModel):
     kd: str = "0"; winrate: str = "0"; hs: str = "0"; matches: str = "0"
     rank: str = ""; faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
     adr: Optional[str] = ""; clutch1v1: Optional[str] = ""; entrySuccess: Optional[str] = ""
