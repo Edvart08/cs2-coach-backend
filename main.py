@@ -502,7 +502,7 @@ level = одно из: Новичок, Средний, Хороший, Про"""
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
                 "messages":[
-                    {"role":"system","content":"Ты CS2 тренер. Обращайся к игроку на 'ты' — 'твой K/D', 'тебе нужно', 'у тебя'. НИКОГДА не пиши 'игрок/игроку'. Отвечай ТОЛЬКО валидным JSON-объектом без markdown и пояснений."},
+                    {"role":"system","content":"Ты CS2 тренер говорящий НАПРЯМУЮ с игроком. ТОЛЬКО 'ты/твой/тебе' — ЗАПРЕЩЕНО 'игрок/игроку/пользователь'. Отвечай ТОЛЬКО валидным JSON без markdown."},
                     {"role":"user","content":prompt}],
                 "temperature":0.6,
                 "response_format":{"type":"json_object"}})
@@ -643,7 +643,7 @@ async def weekly_report(req: WeeklyReportReq):
         r = await client.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
-                "messages":[{"role":"system","content":"Ты тренер CS2. Только JSON без markdown."},
+                "messages":[{"role":"system","content":"Ты CS2 тренер. Говори на ты. ЗАПРЕЩЕНО игрок/игроку. Только JSON без markdown."},
                              {"role":"user","content":prompt}],
                 "temperature":0.7,
                 "response_format":{"type":"json_object"}})
@@ -864,7 +864,7 @@ async def analyze_match(req: MatchReq):
         r = await client.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
-                "messages":[{"role":"system","content":"Тренер CS2. Отвечай ТОЛЬКО JSON без markdown."},
+                "messages":[{"role":"system","content":"Ты CS2 тренер. Говори на 'ты'. ЗАПРЕЩЕНО слово 'игрок'. Отвечай ТОЛЬКО JSON без markdown."},
                              {"role":"user","content":prompt}],
                 "temperature":0.75,
                 "response_format":{"type":"json_object"}})
