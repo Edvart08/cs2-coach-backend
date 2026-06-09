@@ -502,7 +502,7 @@ level = одно из: Новичок, Средний, Хороший, Про"""
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
                 "messages":[
-                    {"role":"system","content":"Ты CS2 тренер говорящий НАПРЯМУЮ с игроком. ТОЛЬКО 'ты/твой/тебе' — ЗАПРЕЩЕНО 'игрок/игроку/пользователь'. Отвечай ТОЛЬКО валидным JSON без markdown."},
+                    {"role":"system","content":"Ты CS2 тренер. СТРОГО ЗАПРЕЩЕНО использовать слова 'игрок', 'игроку', 'пользователь' — ТОЛЬКО 'ты', 'твой', 'тебе', 'у тебя'. Нарушение = ошибка. Говоришь НАПРЯМУЮ с человеком. Отвечай ТОЛЬКО валидным JSON без markdown."},
                     {"role":"user","content":prompt}],
                 "temperature":0.6,
                 "response_format":{"type":"json_object"}})
@@ -643,7 +643,7 @@ async def weekly_report(req: WeeklyReportReq):
         r = await client.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
-                "messages":[{"role":"system","content":"Ты CS2 тренер. Говори на ты. ЗАПРЕЩЕНО игрок/игроку. Только JSON без markdown."},
+                "messages":[{"role":"system","content":"Ты CS2 тренер. СТРОГО ЗАПРЕЩЕНО использовать слова 'игрок', 'игроку', 'пользователь' — ТОЛЬКО 'ты', 'твой', 'тебе', 'у тебя'. Нарушение = ошибка. Только JSON без markdown."},
                              {"role":"user","content":prompt}],
                 "temperature":0.7,
                 "response_format":{"type":"json_object"}})
@@ -749,24 +749,26 @@ async def ai_summary(req: SummaryReq):
     if extra.get("mvps"): steam_text += f", MVP={extra['mvps']}"
     if extra.get("playtime"): steam_text += f", {round(int(extra['playtime'])/60)}ч в игре"
 
-    prompt = f"""Ты профессиональный CS2 тренер-аналитик. Проанализируй статистику игрока максимально детально.
+    prompt = f"""Ты профессиональный CS2 тренер-аналитик. Разговариваешь НАПРЯМУЮ с игроком.
+КРИТИЧЕСКИ ВАЖНО: используй ТОЛЬКО "ты/твой/тебе/у тебя". НИКОГДА не пиши "игрок" или "пользователь".
+Плохо: "Игрок имеет K/D 0.85". Хорошо: "Твой K/D 0.85 говорит о том что..."
 
-ДАННЫЕ ИГРОКА:
+ТВОЯ СТАТИСТИКА:
 K/D={req.kd} | WinRate={req.winrate}% | HS%={req.hs} | ADR={req.adr or '?'} | Матчей={req.matches}
 FACEIT: уровень={req.faceit_level or 'нет'}, ELO={req.faceit_elo or 'нет'}
 Clutch 1v1={req.clutch1v1 or '?'}% | Entry Success={req.entrySuccess or '?'}%{maps_text}{recent_text}{steam_text}
 
 ИНСТРУКЦИЯ:
 - Упоминай конкретные карты, конкретные цифры — никаких общих фраз
-- Сравнивай показатели с уровнем игрока (FACEIT lvl {req.faceit_level or 'без'} / {req.matches} матчей)
-- Тон: прямой, честный, мотивирующий — как реальный тренер
-- verdict: 3-4 предложения, обязательно упомяни карты и конкретные цифры
-- strengths: конкретно (напр. "HS% 42% — выше среднего для уровня, это значит хороший прицел")
-- problems: конкретно (напр. "WR 28% — катастрофически низкий, основная причина...")
-- priority: ОДНО конкретное действие которое даст максимум улучшения
-- weekly_plan: 3 конкретных задания на эту неделю с измеримым результатом
-- role_analysis: разбор роли в команде по статам
-- mental_note: честная психологическая оценка по цифрам
+- Сравнивай показатели с уровнем (FACEIT lvl {req.faceit_level or 'без'} / {req.matches} матчей)
+- Тон: прямой, честный, мотивирующий — как реальный тренер, говорящий на "ты"
+- verdict: 3-4 предложения с "ты/твой", упомяни карты и конкретные цифры
+- strengths: конкретно (напр. "Твой HS% 42% — выше среднего для уровня, значит хороший прицел")
+- problems: конкретно (напр. "Твой WR 28% — катастрофически низкий, основная причина...")
+- priority: ОДНО конкретное действие, говори на "ты"
+- weekly_plan: 3 конкретных задания, говори на "ты"
+- role_analysis: разбор роли по статам, говори на "ты"
+- mental_note: психологическая оценка, говори на "ты"
 
 Верни ТОЛЬКО JSON без markdown:
 {{"verdict":"3-4 предложения с конкретными цифрами и картами",
@@ -864,7 +866,7 @@ async def analyze_match(req: MatchReq):
         r = await client.post("https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization":f"Bearer {GROQ_KEY}","Content-Type":"application/json"},
             json={"model":"llama-3.3-70b-versatile",
-                "messages":[{"role":"system","content":"Ты CS2 тренер. Говори на 'ты'. ЗАПРЕЩЕНО слово 'игрок'. Отвечай ТОЛЬКО JSON без markdown."},
+                "messages":[{"role":"system","content":"Ты CS2 тренер. СТРОГО ЗАПРЕЩЕНО использовать слова 'игрок', 'игроку', 'пользователь' — ТОЛЬКО 'ты', 'твой', 'тебе', 'у тебя'. Нарушение = ошибка. Отвечай ТОЛЬКО JSON без markdown."},
                              {"role":"user","content":prompt}],
                 "temperature":0.75,
                 "response_format":{"type":"json_object"}})
