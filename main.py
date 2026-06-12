@@ -709,7 +709,89 @@ async def coach_chat(request: Request):
         return {"reply": f"Ошибка: {str(e)[:50]}"}
 
 
-class SummaryReq(BaseModel):
+@app.post("/round-analysis")
+async def round_analysis(request: Request):
+    """AI разбор конкретного раунда по описанию"""
+    try:
+        data = await request.json()
+        description = data.get("description", "").strip()
+        steamid = data.get("steamid", "")
+        kd = data.get("kd", "?")
+        rank = data.get("rank", "?")
+
+        if not description:
+            return {"error": "Описание не может быть пустым"}
+        if len(description) > 1000:
+            return {"error": "Слишком длинное описание (максимум 1000 символов)"}
+
+        # Check daily limit for free users
+        if steamid:
+            usage = check_usage(steamid)
+            if not usage["pro"]:
+                day_key = f"round_analysis_{steamid}_{time.strftime('%Y-%m-%d')}"
+                count = int(_load(day_key, 0) or 0)
+                if count >= 5:
+                    return {"error": "Дневной лимит разборов исчерпан (5/день). PRO — безлимитно."}
+                _save(day_key, count + 1)
+
+        prompt = f"""Ты профессиональный CS2 тренер-аналитик. Тебе нужно разобрать конкретный раунд.
+
+ДАННЫЕ ИГРОКА: K/D={kd}, FACEIT уровень={rank}
+
+ОПИСАНИЕ РАУНДА:
+{description}
+
+Проанализируй раунд и ответь ТОЛЬКО валидным JSON без markdown:
+{{
+  "verdict": "2-3 предложения общего вывода о раунде",
+  "score": <число 0-100, оценка действий игрока>,
+  "mistakes": [
+    {{
+      "title": "Краткое название ошибки",
+      "description": "Детальное объяснение что было не так и почему это привело к проигрышу",
+      "severity": "critical|major|minor"
+    }}
+  ],
+  "good": ["что сделал правильно 1", "что сделал правильно 2"],
+  "howto": "Конкретное описание как надо было разыграть этот раунд шаг за шагом",
+  "lesson": "Одно главное правило которое нужно запомнить из этого раунда"
+}}
+
+Если информации недостаточно для полного разбора — разбери что есть, попроси уточнить в verdict.
+Говори на 'ты'. ЗАПРЕЩЕНО 'игрок/игроку/пользователь'."""
+
+        async with httpx.AsyncClient(timeout=25) as client:
+            r = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": "Ты CS2 тренер. Отвечай ТОЛЬКО валидным JSON без markdown. Говори на ты."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.6,
+                    "max_tokens": 800
+                }
+            )
+
+        raw = r.json()["choices"][0]["message"]["content"]
+        # Strip markdown if present
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = re.sub(r'^```[a-z]*\n?', '', raw)
+            raw = re.sub(r'\n?```$', '', raw)
+
+        result = json.loads(raw)
+        return result
+
+    except json.JSONDecodeError:
+        return {"error": "Не удалось разобрать ответ AI. Попробуй ещё раз."}
+    except Exception as e:
+        return {"error": f"Ошибка: {str(e)[:80]}"}
+
+
+
     kd: str = "0"; winrate: str = "0"; hs: str = "0"; matches: str = "0"
     rank: str = ""; faceit_level: Optional[str] = ""; faceit_elo: Optional[str] = ""
     adr: Optional[str] = ""; clutch1v1: Optional[str] = ""; entrySuccess: Optional[str] = ""
