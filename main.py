@@ -111,34 +111,61 @@ def _get_faceit_cached(steamid: str):
     return None
 
 async def _fetch_faceit_for_bot(steamid: str):
+    """Получает свежие FACEIT данные для матч-поллинга с полной статистикой."""
     cached = _get_faceit_cached(steamid)
     if cached:
         return cached
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get("https://open.faceit.com/data/v4/players",
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(f"{FACEIT_BASE}/players",
                 params={"game": "cs2", "game_player_id": steamid},
                 headers={"Authorization": f"Bearer {FACEIT_KEY}"})
             if r.status_code != 200:
                 return None
             player = r.json()
-            fid = player.get("player_id", "")
-            game = player.get("games", {}).get("cs2", {})
-            hr = await c.get(f"https://open.faceit.com/data/v4/players/{fid}/history",
+            fid      = player.get("player_id", "")
+            game     = player.get("games", {}).get("cs2", {})
+            nickname = player.get("nickname", "")
+
+            # Lifetime статистика
+            sr = await c.get(f"{FACEIT_BASE}/players/{fid}/stats/cs2",
+                headers={"Authorization": f"Bearer {FACEIT_KEY}"})
+            lifetime = {}
+            if sr.status_code == 200:
+                lt = sr.json().get("lifetime", {})
+                lifetime = {
+                    "kd":             lt.get("Average K/D Ratio", ""),
+                    "hs":             lt.get("Average Headshots %", ""),
+                    "winrate":        lt.get("Win Rate %", ""),
+                    "matches":        lt.get("Matches", ""),
+                    "current_streak": lt.get("Current Win Streak", ""),
+                    "longest_streak": lt.get("Longest Win Streak", ""),
+                }
+
+            # История матчей — детали только для последнего
+            hr = await c.get(f"{FACEIT_BASE}/players/{fid}/history",
                 params={"game": "cs2", "limit": 5},
                 headers={"Authorization": f"Bearer {FACEIT_KEY}"})
             matches = []
             if hr.status_code == 200:
-                for m in hr.json().get("items", []):
-                    matches.append({
-                        "match_id": m.get("match_id", ""),
-                        "elo_change": m.get("elo_change", 0),
-                    })
+                items = hr.json().get("items", [])
+                for i, m in enumerate(items):
+                    mid    = m.get("match_id", "")
+                    elo_ch = m.get("elo_change", 0)
+                    match_data = {"match_id": mid, "elo_change": elo_ch}
+                    if i == 0 and mid:
+                        stats = await faceit_match_stats(c, mid, fid)
+                        if stats:
+                            match_data.update(stats)
+                    matches.append(match_data)
+
             data = {
-                "elo": game.get("faceit_elo"),
-                "level": game.get("skill_level"),
-                "matches": matches,
-                "lifetime": {},
+                "faceit_id": fid,
+                "nickname":  nickname,
+                "elo":       game.get("faceit_elo"),
+                "level":     game.get("skill_level"),
+                "lifetime":  lifetime,
+                "matches":   matches,
             }
             faceit_cache[steamid] = {"data": data, "updated_at": time.time()}
             return data
