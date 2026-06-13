@@ -64,6 +64,8 @@ pro_users        = _load("pro_users", {})
 pro_keys         = _load("pro_keys", {})
 ai_usage         = _load("ai_usage", {})
 banned_users     = _load("banned_users", {})
+coach_memories   = _load("coach_memories", {})   # steamid -> {summary, messages, updated_at}
+referrals        = _load("referrals", {})         # ref_nickname -> {owner_steamid, invited: [...], rewarded: [...]}
 
 # Если pro_users пустой (Render рестартнул) — пробуем восстановить из GitHub backup
 async def restore_from_github():
@@ -2194,3 +2196,187 @@ async def share_profile(steamid: str):
 @app.get("/")
 def root():
     return {"status":"ok"}
+
+
+# ── Coach Memory ───────────────────────────────────────────────────────────────
+
+@app.post("/coach-memory/get")
+async def get_coach_memory(request: Request):
+    """Возвращает память тренера для steamid"""
+    try:
+        data = await request.json()
+        steamid = data.get("steamid", "").strip()
+        if not steamid:
+            return {"memory": None}
+        mem = coach_memories.get(steamid)
+        return {"memory": mem}
+    except Exception as e:
+        return {"memory": None, "error": str(e)}
+
+
+@app.post("/coach-memory/save")
+async def save_coach_memory(request: Request):
+    """Сохраняет последние сообщения и обновляет краткое резюме через AI"""
+    global coach_memories
+    try:
+        data = await request.json()
+        steamid   = data.get("steamid", "").strip()
+        messages  = data.get("messages", [])   # [{role, content}, ...]
+        stats_ctx = data.get("stats_ctx", "")  # краткая строка со статой
+        if not steamid or not messages:
+            return {"ok": False}
+
+        # Оставляем последние 10 сообщений для хранения
+        recent = messages[-10:]
+
+        # Строим краткое AI-резюме (раз в сохранение)
+        summary = ""
+        try:
+            prev_summary = coach_memories.get(steamid, {}).get("summary", "")
+            prompt_msgs = [
+                {"role": "system", "content": (
+                    "Ты помощник, который составляет краткое резюме разговора игрока с тренером CS2. "
+                    "Выдели 2-4 ключевых момента: над чем работает игрок, какие проблемы обсуждали, "
+                    "какие советы дал тренер. Максимум 3 предложения. Только факты, без воды."
+                )},
+                {"role": "user", "content": (
+                    f"Статистика игрока: {stats_ctx}\n\n"
+                    f"Предыдущее резюме: {prev_summary}\n\n"
+                    f"Новые сообщения:\n" +
+                    "\n".join(f"{m['role'].upper()}: {m['content']}" for m in recent[-6:])
+                )}
+            ]
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                    json={"model": "llama-3.3-70b-versatile", "messages": prompt_msgs, "max_tokens": 150}
+                )
+            summary = r.json()["choices"][0]["message"]["content"].strip()
+        except:
+            summary = coach_memories.get(steamid, {}).get("summary", "")
+
+        coach_memories[steamid] = {
+            "summary": summary,
+            "messages": recent,
+            "updated_at": int(time.time()),
+            "stats_ctx": stats_ctx,
+        }
+        _save("coach_memories", coach_memories)
+        return {"ok": True, "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ── Referral Program ───────────────────────────────────────────────────────────
+
+REFERRAL_REWARD_DAYS = 7   # дней PRO за каждого приглашённого
+
+@app.post("/referral/register")
+async def referral_register(request: Request):
+    """Регистрирует реферальный код для пользователя (nickname как код).
+    Вызывается при первом входе если в URL был ?ref=NICKNAME."""
+    global referrals, pro_users
+    try:
+        data = await request.json()
+        new_steamid  = data.get("steamid", "").strip()
+        ref_nickname = data.get("ref", "").strip().lower()
+        if not new_steamid or not ref_nickname:
+            return {"ok": False, "detail": "missing params"}
+
+        # Нельзя быть рефералом самого себя
+        owner_entry = referrals.get(ref_nickname)
+        if not owner_entry:
+            return {"ok": False, "detail": "ref not found"}
+        owner_steamid = owner_entry.get("owner_steamid", "")
+        if owner_steamid == new_steamid:
+            return {"ok": False, "detail": "self-referral"}
+
+        # Уже был приглашён — не считаем повторно
+        invited = owner_entry.get("invited", [])
+        if new_steamid in invited:
+            return {"ok": False, "detail": "already invited"}
+
+        # Записываем нового реферала
+        invited.append(new_steamid)
+        owner_entry["invited"] = invited
+
+        # Начисляем владельцу +7 дней PRO
+        rewarded = owner_entry.get("rewarded", [])
+        rewarded.append(new_steamid)
+        owner_entry["rewarded"] = rewarded
+        referrals[ref_nickname] = owner_entry
+        _save("referrals", referrals)
+
+        # Продлеваем PRO владельцу
+        if owner_steamid in pro_users:
+            current_exp = pro_users[owner_steamid].get("expires_at", int(time.time()))
+            pro_users[owner_steamid]["expires_at"] = current_exp + REFERRAL_REWARD_DAYS * 86400
+        else:
+            pro_users[owner_steamid] = {
+                "key": "referral",
+                "activated_at": int(time.time()),
+                "expires_at": int(time.time()) + REFERRAL_REWARD_DAYS * 86400,
+                "plan": "referral",
+                "order": f"ref_{ref_nickname}_{new_steamid[:8]}",
+            }
+        _save("pro_users", pro_users)
+
+        return {"ok": True, "reward_days": REFERRAL_REWARD_DAYS, "owner": owner_steamid}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/referral/init")
+async def referral_init(request: Request):
+    """Создаёт реферальный код для пользователя если его ещё нет.
+    Вызывается при входе через Steam."""
+    global referrals
+    try:
+        data = await request.json()
+        steamid  = data.get("steamid", "").strip()
+        nickname = data.get("nickname", "").strip().lower()
+        if not steamid or not nickname:
+            return {"ok": False}
+
+        # Уже есть запись с этим ником — вернём как есть
+        if nickname in referrals and referrals[nickname].get("owner_steamid") == steamid:
+            entry = referrals[nickname]
+            return {
+                "ok": True,
+                "ref_code": nickname,
+                "invited_count": len(entry.get("invited", [])),
+                "rewarded_count": len(entry.get("rewarded", [])),
+            }
+
+        # Если ника ещё нет — создаём
+        if nickname not in referrals:
+            referrals[nickname] = {"owner_steamid": steamid, "invited": [], "rewarded": []}
+            _save("referrals", referrals)
+
+        entry = referrals[nickname]
+        return {
+            "ok": True,
+            "ref_code": nickname,
+            "invited_count": len(entry.get("invited", [])),
+            "rewarded_count": len(entry.get("rewarded", [])),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/referral/stats/{steamid}")
+async def referral_stats(steamid: str):
+    """Статистика рефералов для игрока"""
+    try:
+        for code, entry in referrals.items():
+            if entry.get("owner_steamid") == steamid:
+                return {
+                    "ok": True,
+                    "ref_code": code,
+                    "invited_count": len(entry.get("invited", [])),
+                    "rewarded_count": len(entry.get("rewarded", [])),
+                }
+        return {"ok": False, "detail": "no referral code"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
