@@ -320,7 +320,7 @@ async def faceit_full(steam_id=None, nickname=None):
 
         # Match history
         hr = await client.get(f"{FACEIT_BASE}/players/{fid}/history",
-            params={"game":"cs2","limit":12}, headers=fh())
+            params={"game":"cs2","limit":20}, headers=fh())
         match_ids = []
         elo_changes = {}
         if hr.status_code == 200:
