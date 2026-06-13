@@ -17,7 +17,8 @@ ADMIN_TOKEN   = os.environ.get("ADMIN_TOKEN", "change_me_in_render")
 YOO_SHOP_ID   = os.environ.get("YOOKASSA_SHOP_ID", "1376791")  # ShopID из ЮКассы
 YOO_SECRET    = os.environ.get("YOOKASSA_SECRET", "")         # Секретный ключ из ЮКассы → Интеграция → API ключи
 FRONTEND_URL   = os.environ.get("FRONTEND_URL", "https://cs2-coach-frontend.vercel.app")
-TG_BOT_TOKEN   = os.environ.get("TG_BOT_TOKEN", "")
+TG_BOT_TOKEN        = os.environ.get("TG_BOT_TOKEN", "")        # бот поддержки (существующий)
+TG_BOT_TOKEN_NOTIFY = os.environ.get("TG_BOT_TOKEN_NOTIFY", "")  # бот уведомлений (новый)
 TG_ADMIN_ID    = os.environ.get("TG_ADMIN_ID", "")
 STEAM_OPENID  = "https://steamcommunity.com/openid/login"
 FACEIT_BASE   = "https://open.faceit.com/data/v4"
@@ -66,6 +67,7 @@ ai_usage         = _load("ai_usage", {})
 banned_users     = _load("banned_users", {})
 coach_memories   = _load("coach_memories", {})   # steamid -> {summary, messages, updated_at}
 referrals        = _load("referrals", {})         # ref_nickname -> {owner_steamid, invited: [...], rewarded: [...]}
+tg_users         = _load("tg_users", {})          # steamid -> {chat_id, remind, last_match_id}
 
 # Если pro_users пустой (Render рестартнул) — пробуем восстановить из GitHub backup
 async def restore_from_github():
@@ -86,9 +88,106 @@ async def restore_from_github():
     except Exception as e:
         print(f"[RESTORE] Ошибка: {e}")
 
+faceit_cache = {}  # steamid -> {data, updated_at}
+
+def _get_tg_users():
+    return tg_users
+
+def _set_tg_users(d):
+    global tg_users
+    tg_users = d
+    _save("tg_users", tg_users)
+
+def _on_tg_link(steamid: str, chat_id: str):
+    log_admin("TG_LINK", f"{steamid} linked chat_id {chat_id}")
+
+def _on_tg_unlink(chat_id: str):
+    log_admin("TG_UNLINK", f"chat_id {chat_id} unlinked")
+
+def _get_faceit_cached(steamid: str):
+    entry = faceit_cache.get(steamid)
+    if entry and time.time() - entry.get("updated_at", 0) < 600:
+        return entry.get("data")
+    return None
+
+async def _fetch_faceit_for_bot(steamid: str):
+    cached = _get_faceit_cached(steamid)
+    if cached:
+        return cached
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get("https://open.faceit.com/data/v4/players",
+                params={"game": "cs2", "game_player_id": steamid},
+                headers={"Authorization": f"Bearer {FACEIT_KEY}"})
+            if r.status_code != 200:
+                return None
+            player = r.json()
+            fid = player.get("player_id", "")
+            game = player.get("games", {}).get("cs2", {})
+            hr = await c.get(f"https://open.faceit.com/data/v4/players/{fid}/history",
+                params={"game": "cs2", "limit": 5},
+                headers={"Authorization": f"Bearer {FACEIT_KEY}"})
+            matches = []
+            if hr.status_code == 200:
+                for m in hr.json().get("items", []):
+                    matches.append({
+                        "match_id": m.get("match_id", ""),
+                        "elo_change": m.get("elo_change", 0),
+                    })
+            data = {
+                "elo": game.get("faceit_elo"),
+                "level": game.get("skill_level"),
+                "matches": matches,
+                "lifetime": {},
+            }
+            faceit_cache[steamid] = {"data": data, "updated_at": time.time()}
+            return data
+    except Exception:
+        return None
+
+async def _groq_summary(prompt: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                json={"model": "llama-3.3-70b-versatile",
+                      "messages": [{"role": "user", "content": prompt}],
+                      "max_tokens": 120}
+            )
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        return ""
+
 @app.on_event("startup")
 async def startup():
     asyncio.create_task(restore_from_github())
+    if TG_BOT_TOKEN_NOTIFY:
+        try:
+            from bot import run_bot, daily_reminder_loop, match_poll_loop
+            asyncio.create_task(run_bot(
+                token=TG_BOT_TOKEN_NOTIFY,
+                get_state=_get_tg_users,
+                set_state=_set_tg_users,
+                on_link=_on_tg_link,
+                on_unlink=_on_tg_unlink,
+                get_faceit=_get_faceit_cached,
+                get_groq_summary=_groq_summary,
+                groq_key=GROQ_KEY or "",
+                faceit_key=FACEIT_KEY or "",
+            ))
+            asyncio.create_task(daily_reminder_loop(TG_BOT_TOKEN_NOTIFY, _get_tg_users))
+            asyncio.create_task(match_poll_loop(
+                token=TG_BOT_TOKEN_NOTIFY,
+                get_state=_get_tg_users,
+                set_state=_set_tg_users,
+                fetch_faceit_fn=_fetch_faceit_for_bot,
+                groq_key=GROQ_KEY or "",
+                interval=300,
+            ))
+            print("[bot] Telegram bot tasks started")
+        except Exception as e:
+            print(f"[bot] Failed to start: {e}")
 
 FREE_LIMIT = 1   # 1 бесплатный AI разбор в неделю
 
@@ -2380,3 +2479,45 @@ async def referral_stats(steamid: str):
         return {"ok": False, "detail": "no referral code"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+
+# ── Telegram Link ──────────────────────────────────────────────────────────────
+
+@app.get("/telegram/link/{steamid}")
+async def telegram_link(steamid: str):
+    """Возвращает deep link для привязки Telegram."""
+    if not TG_BOT_TOKEN_NOTIFY:
+        return {"ok": False, "detail": "Bot not configured"}
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.get(f"https://api.telegram.org/bot{TG_BOT_TOKEN_NOTIFY}/getMe")
+        bot_username = r.json().get("result", {}).get("username", "")
+        if not bot_username:
+            return {"ok": False, "detail": "Cannot get bot username"}
+        link = f"https://t.me/{bot_username}?start={steamid}"
+        return {"ok": True, "link": link, "bot": bot_username}
+    except Exception as e:
+        return {"ok": False, "detail": str(e)}
+
+
+@app.get("/telegram/status/{steamid}")
+async def telegram_status(steamid: str):
+    """Проверяет привязан ли Telegram у игрока."""
+    user = tg_users.get(steamid)
+    if user and user.get("chat_id"):
+        return {"linked": True, "remind": user.get("remind", True)}
+    return {"linked": False}
+
+
+@app.post("/telegram/unlink")
+async def telegram_unlink(request: Request):
+    """Отвязывает Telegram через сайт."""
+    global tg_users
+    data = await request.json()
+    steamid = data.get("steamid", "")
+    if steamid in tg_users:
+        del tg_users[steamid]
+        _save("tg_users", tg_users)
+        return {"ok": True}
+    return {"ok": False, "detail": "not linked"}
